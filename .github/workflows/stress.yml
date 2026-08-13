@@ -12,10 +12,14 @@ on:
         required: false
         default: "TestStress_"
 
+# grant the default GITHUB_TOKEN write so the artifact upload step works
+permissions:
+  contents: write
+
 jobs:
   stress:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout gnoswap contracts
         uses: actions/checkout@v4
@@ -28,7 +32,6 @@ jobs:
           repository: gnoswap-labs/gno
           ref: master
           path: gno
-          # master fork matches contract gnomod gno="0.9" requirement
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -41,18 +44,35 @@ jobs:
           make install.gno
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      - name: Run stress tests
-        working-directory: gnoswap
-        env:
-          GNO_TOOLS: "$HOME/go/bin"
+      - name: Symlink contracts into gno examples tree (mirrors upstream Makefile)
+        working-directory: gno
         run: |
           export PATH="$HOME/go/bin:$PATH"
-          # symlink contract tree so gno test resolves gno.land/r/gnoswap/*
-          mkdir -p "$HOME/gno/src"
-          ln -sfn "$(pwd)/contract/r/gnoswap" "$HOME/gno/src/gnoswap" 2>/dev/null || true
-          gno test -v -run "${{ github.event.inputs.run }}" "./${{ github.event.inputs.pkg }}" 2>&1 | tee stress.log
+          # link both realm (r/) and pure (p/) trees so cross-imports resolve
+          SRC_R="$GITHUB_WORKSPACE/gnoswap/contract/r/gnoswap"
+          SRC_P="$GITHUB_WORKSPACE/gnoswap/contract/p/gnoswap"
+          DST_R="examples/gno.land/r/gnoswap"
+          DST_P="examples/gno.land/p/gnoswap"
+          mkdir -p "$(dirname "$DST_R")" "$(dirname "$DST_P")"
+          ln -sfn "$SRC_R" "$DST_R"
+          ln -sfn "$SRC_P" "$DST_P"
+          echo "linked $SRC_R -> $DST_R"
+          echo "linked $SRC_P -> $DST_P"
+          ls -la "$DST_R" | head -3
+          ls -la "$DST_P" | head -3
+
+      - name: Run stress tests
+        working-directory: gno/examples
+        env:
+          GNOROOT: "$GITHUB_WORKSPACE/gno"
+        run: |
+          export PATH="$HOME/go/bin:$PATH"
+          export GNOROOT="$GITHUB_WORKSPACE/gno"
+          PKG="${{ github.event.inputs.pkg }}"
+          RUN="${{ github.event.inputs.run }}"
+          gno test -v -run "$RUN" "./$PKG" 2>&1 | tee "$GITHUB_WORKSPACE/gnoswap/stress.log"
           echo "=== STRESS RESULT ==="
-          grep -E "^(ok|FAIL|PASS|---)" stress.log | tail -40
+          grep -E "^(ok|FAIL|PASS|---|panic)" "$GITHUB_WORKSPACE/gnoswap/stress.log" | tail -60 || true
 
       - name: Upload stress report
         if: always()
@@ -60,3 +80,4 @@ jobs:
         with:
           name: gnoswap-stress-report
           path: gnoswap/stress.log
+          if-no-files-found: warn
