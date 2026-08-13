@@ -27,11 +27,10 @@ func TestStress_CardinalityGrowLoop(cur realm, t *testing.T) {
 			WithAmount("1000000000000000000000000").
 			Build())
 
-	pool := env.getPool(t0, t1, fee)
 	target := uint16(2000)
 	grown := uint16(0)
 	for next := uint16(2); next <= target; next++ {
-		err := pool.IncreaseObservationCardinalityNext(cur, t0, t1, fee, next)
+		err := pl.IncreaseObservationCardinalityNext(cross(cur), t0, t1, fee, next)
 		if err != nil {
 			break
 		}
