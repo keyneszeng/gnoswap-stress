@@ -1,0 +1,298 @@
+package governance
+
+import (
+	"gno.land/p/gnoswap/utils"
+	bptree "gno.land/p/nt/bptree/v0"
+
+	"gno.land/r/gnoswap/gov/governance"
+)
+
+type mockGovernanceStore struct {
+	configCounter             *governance.Counter
+	proposalCounter           *governance.Counter
+	config                    governance.Config
+	configs                   *bptree.BPTree
+	proposals                 *bptree.BPTree
+	proposalUserVotingInfos   *bptree.BPTree
+	userProposals             *bptree.BPTree
+	setProposalVotingInfosErr error
+}
+
+// Counter methods
+func (m *mockGovernanceStore) HasConfigCounterStoreKey() bool {
+	return m.configCounter != nil
+}
+
+func (m *mockGovernanceStore) GetConfigCounter() *governance.Counter {
+	return m.configCounter
+}
+
+func (m *mockGovernanceStore) SetConfigCounter(_ int, rlm realm, counter *governance.Counter) error {
+	m.configCounter = counter
+	return nil
+}
+
+func (m *mockGovernanceStore) HasProposalCounterStoreKey() bool {
+	return m.proposalCounter != nil
+}
+
+func (m *mockGovernanceStore) GetProposalCounter() *governance.Counter {
+	return m.proposalCounter
+}
+
+func (m *mockGovernanceStore) SetProposalCounter(_ int, rlm realm, counter *governance.Counter) error {
+	m.proposalCounter = counter
+	return nil
+}
+
+// Config methods
+func (m *mockGovernanceStore) HasConfigsStoreKey() bool {
+	return m.configs != nil
+}
+
+func (m *mockGovernanceStore) SetConfigs(_ int, rlm realm, configs *bptree.BPTree) error {
+	m.configs = configs
+	return nil
+}
+
+func (m *mockGovernanceStore) GetConfig(version int64) (governance.Config, bool) {
+	if m.configs == nil {
+		return governance.NewDefaultConfig(), false
+	}
+	result := m.configs.Get(utils.FormatInt(version))
+	if result == nil {
+		return governance.NewDefaultConfig(), false
+	}
+	return result.(governance.Config), true
+}
+
+func (m *mockGovernanceStore) SetConfig(_ int, rlm realm, version int64, config governance.Config) error {
+	if m.configs == nil {
+		m.configs = governance.NewConfigTree()
+	}
+	m.configs.Set(utils.FormatInt(version), config)
+	return nil
+}
+
+// Proposal methods
+func (m *mockGovernanceStore) HasProposalsStoreKey() bool {
+	return m.proposals != nil
+}
+
+func (m *mockGovernanceStore) GetProposals() *bptree.BPTree {
+	return m.proposals
+}
+
+func (m *mockGovernanceStore) GetProposal(proposalID int64) (*governance.Proposal, bool) {
+	if m.proposals == nil {
+		return nil, false
+	}
+	proposal := m.proposals.Get(utils.FormatInt(proposalID))
+	if proposal == nil {
+		return nil, false
+	}
+	return proposal.(*governance.Proposal), true
+}
+
+func (m *mockGovernanceStore) SetProposal(_ int, rlm realm, proposalID int64, proposal *governance.Proposal) error {
+	if m.proposals == nil {
+		m.proposals = governance.NewProposalTree()
+	}
+	m.proposals.Set(utils.FormatInt(proposalID), proposal)
+	return nil
+}
+
+func (m *mockGovernanceStore) SetProposals(_ int, rlm realm, proposals *bptree.BPTree) error {
+	m.proposals = proposals
+	return nil
+}
+
+// Proposal voting info methods
+func (m *mockGovernanceStore) HasProposalVotingInfosStoreKey() bool {
+	return true
+}
+
+func (m *mockGovernanceStore) GetProposalUserVotingInfos() *bptree.BPTree {
+	return m.proposalUserVotingInfos
+}
+
+func (m *mockGovernanceStore) GetProposalVotingInfos(proposalID int64) (*bptree.BPTree, bool) {
+	if m.proposalUserVotingInfos == nil {
+		return nil, false
+	}
+	result := m.proposalUserVotingInfos.Get(utils.FormatInt(proposalID))
+	if result == nil {
+		return nil, false
+	}
+	return result.(*bptree.BPTree), true
+}
+
+func (m *mockGovernanceStore) SetProposalVotingInfos(_ int, rlm realm, proposalID int64, votingInfos *bptree.BPTree) error {
+	if m.setProposalVotingInfosErr != nil {
+		return m.setProposalVotingInfosErr
+	}
+	if m.proposalUserVotingInfos == nil {
+		m.proposalUserVotingInfos = governance.NewProposalUserVotingInfoTree()
+	}
+	m.proposalUserVotingInfos.Set(utils.FormatInt(proposalID), votingInfos)
+	return nil
+}
+
+func (m *mockGovernanceStore) HasProposalUserVotingInfosStoreKey() bool {
+	return m.proposalUserVotingInfos != nil
+}
+
+func (m *mockGovernanceStore) SetProposalUserVotingInfos(_ int, rlm realm, votingInfos *bptree.BPTree) error {
+	m.proposalUserVotingInfos = votingInfos
+	return nil
+}
+
+// User proposals methods
+func (m *mockGovernanceStore) HasUserProposalsStoreKey() bool {
+	return m.userProposals != nil
+}
+
+func (m *mockGovernanceStore) GetUserProposalIDs(user string) ([]int64, bool) {
+	if m.userProposals == nil {
+		return nil, false
+	}
+	result := m.userProposals.Get(user)
+	if result == nil {
+		return nil, false
+	}
+	return result.([]int64), true
+}
+
+func (m *mockGovernanceStore) AddUserProposal(_ int, rlm realm, user string, proposalID int64) error {
+	if m.userProposals == nil {
+		m.userProposals = governance.NewUserProposalTree()
+	}
+
+	var proposalIDs []int64
+	if existing := m.userProposals.Get(user); existing != nil {
+		proposalIDs = existing.([]int64)
+	}
+	proposalIDs = append(proposalIDs, proposalID)
+	m.userProposals.Remove(user)
+	m.userProposals.Set(user, proposalIDs)
+	return nil
+}
+
+func (m *mockGovernanceStore) RemoveUserProposal(_ int, rlm realm, user string, proposalID int64) error {
+	if m.userProposals == nil {
+		return nil
+	}
+
+	proposalIDsRaw := m.userProposals.Get(user)
+	if proposalIDsRaw == nil {
+		return nil
+	}
+
+	proposalIDs := proposalIDsRaw.([]int64)
+	newProposalIDs := make([]int64, 0)
+
+	for _, id := range proposalIDs {
+		if id == proposalID {
+			continue
+		}
+
+		newProposalIDs = append(newProposalIDs, id)
+	}
+
+	if len(newProposalIDs) == 0 {
+		m.userProposals.Remove(user)
+	} else {
+		m.userProposals.Remove(user)
+		m.userProposals.Set(user, newProposalIDs)
+	}
+
+	return nil
+}
+
+func (m *mockGovernanceStore) SetUserProposals(_ int, rlm realm, userProposals *bptree.BPTree) error {
+	m.userProposals = userProposals
+	return nil
+}
+
+func newMockGovernance() *governanceV1 {
+	store := newMockGovernanceStore()
+	return &governanceV1{
+		store:          store,
+		stakerAccessor: newMockGovStakerAccessor(),
+	}
+}
+
+func newMockGovernanceStore() *mockGovernanceStore {
+	return &mockGovernanceStore{
+		configCounter:           governance.NewCounter(),
+		proposalCounter:         governance.NewCounter(),
+		configs:                 governance.NewConfigTree(),
+		proposals:               governance.NewProposalTree(),
+		proposalUserVotingInfos: governance.NewProposalUserVotingInfoTree(),
+		userProposals:           governance.NewUserProposalTree(),
+	}
+}
+
+// mockGovStakerAccessor provides a mock implementation of GovStakerAccessor for testing.
+type mockGovStakerAccessor struct {
+	totalDelegation          int64
+	totalDelegationResponses []int64
+	totalXGnsSupply          int64
+	userDelegations          map[string]int64
+}
+
+func (m *mockGovStakerAccessor) GetTotalDelegationAmountAtSnapshot(snapshotTime int64) (int64, bool) {
+	if len(m.totalDelegationResponses) > 0 {
+		amount := m.totalDelegationResponses[0]
+		m.totalDelegationResponses = m.totalDelegationResponses[1:]
+		if amount <= 0 {
+			return 0, false
+		}
+		return amount, true
+	}
+
+	if m.totalDelegation <= 0 {
+		return 0, false
+	}
+	return m.totalDelegation, true
+}
+
+func (m *mockGovStakerAccessor) GetUserDelegationAmountAtSnapshot(userAddr address, snapshotTime int64) (int64, bool) {
+	if m.userDelegations == nil {
+		return 0, false
+	}
+	amount, exists := m.userDelegations[userAddr.String()]
+	if !exists || amount <= 0 {
+		return 0, false
+	}
+	return amount, true
+}
+
+func (m *mockGovStakerAccessor) GetTotalxGnsSupply() int64 {
+	return m.totalXGnsSupply
+}
+
+// SetTotalDelegation sets the total delegation amount for the mock
+func (m *mockGovStakerAccessor) SetTotalDelegation(amount int64) {
+	m.totalDelegation = amount
+}
+
+func (m *mockGovStakerAccessor) SetTotalxGnsSupply(amount int64) {
+	m.totalXGnsSupply = amount
+}
+
+// SetUserDelegation sets the delegation amount for a specific user
+func (m *mockGovStakerAccessor) SetUserDelegation(userAddr address, amount int64) {
+	if m.userDelegations == nil {
+		m.userDelegations = make(map[string]int64)
+	}
+	m.userDelegations[userAddr.String()] = amount
+}
+
+func newMockGovStakerAccessor() *mockGovStakerAccessor {
+	return &mockGovStakerAccessor{
+		totalDelegation: 0,
+		totalXGnsSupply: 0,
+		userDelegations: make(map[string]int64),
+	}
+}

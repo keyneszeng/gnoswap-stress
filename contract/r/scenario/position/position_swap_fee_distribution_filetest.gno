@@ -1,0 +1,250 @@
+// position swap fee distribution
+
+// PKGPATH: gno.land/r/demo/main
+
+package main
+
+import (
+	"testing"
+
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/common"
+
+	"gno.land/r/gnoswap/pool"
+	"gno.land/r/gnoswap/position"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/foo"
+)
+
+const (
+	INT64_MAX int64 = 9223372036854775807
+
+	MIN_PRICE string = "4295128740"
+)
+
+var (
+	adminAddr, _  = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm    = testing.NewUserRealm(adminAddr)
+	poolAddr, _   = access.GetAddress(prbac.ROLE_POOL.String())
+	routerAddr, _ = access.GetAddress(prbac.ROLE_ROUTER.String())
+	routerRealm   = testing.NewUserRealm(routerAddr)
+
+	barPath        = "gno.land/r/onbloc/bar.BAR"
+	fooPath        = "gno.land/r/onbloc/foo.FOO"
+	fee500  uint32 = 500
+)
+
+func main(cur realm) {
+	ufmt.Println("[SCENARIO] 1. Initialize pool with tick 10000")
+	initPool(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 2. Mint wide range position (8000~12000)")
+	mintWidePosition(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 3. Mint tight range position (9500~10500)")
+	mintTightPosition(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 4. Check fees before swap")
+	checkFeesBeforeSwap(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 5. Execute swap")
+	executeSwap(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 6. Check fee distribution after swap")
+	checkFeesAfterSwap(cur)
+	println()
+}
+
+func initPool(cur realm) {
+	testing.SetRealm(adminRealm)
+	pool.SetPoolCreationFee(cross(cur), 0)
+
+	ufmt.Println("[INFO] Creating pool at tick 10000")
+	pool.CreatePool(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		"130621891405341611593710811006",
+	)
+}
+
+func mintWidePosition(cur realm) {
+	testing.SetRealm(adminRealm)
+	bar.Approve(cross(cur), poolAddr, 18394892)
+	foo.Approve(cross(cur), poolAddr, 50000000)
+
+	ufmt.Println("[INFO] Minting position with wide range")
+	positionId, liquidity, amount0, amount1 := position.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		8000,
+		12000,
+		"50000000",
+		"50000000",
+		"0",
+		"0",
+		9999999999,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] Position ID should be %d\n", positionId)
+	ufmt.Printf("[EXPECTED] Liquidity should be %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] Amount0 should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Amount1 should be %s\n", amount1)
+}
+
+func mintTightPosition(cur realm) {
+	testing.SetRealm(adminRealm)
+	bar.Approve(cross(cur), poolAddr, 18394892)
+	foo.Approve(cross(cur), poolAddr, 50000000)
+
+	ufmt.Println("[INFO] Minting position with tight range")
+	positionId, liquidity, amount0, amount1 := position.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		9500,
+		10500,
+		"50000000",
+		"50000000",
+		"0",
+		"0",
+		9999999999,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] Position ID should be %d\n", positionId)
+	ufmt.Printf("[EXPECTED] Liquidity should be %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] Amount0 should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Amount1 should be %s\n", amount1)
+}
+
+func checkFeesBeforeSwap(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	ufmt.Println("[INFO] Checking fees for position 1")
+	_, fee0, fee1, _, _, _ := position.CollectFee(cross(cur), 1)
+	ufmt.Printf("[EXPECTED] Fee0 should be %s\n", fee0)
+	ufmt.Printf("[EXPECTED] Fee1 should be %s\n", fee1)
+
+	ufmt.Println("[INFO] Checking fees for position 2")
+	_, fee0, fee1, _, _, _ = position.CollectFee(cross(cur), 2)
+	ufmt.Printf("[EXPECTED] Fee0 should be %s\n", fee0)
+	ufmt.Printf("[EXPECTED] Fee1 should be %s\n", fee1)
+}
+
+func executeSwap(cur realm) {
+	testing.SetRealm(adminRealm)
+	bar.Approve(cross(cur), poolAddr, 1234567)
+
+	// set current realm and origin caller
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/gnoswap/router"))
+	ufmt.Println("[INFO] Executing swap")
+	amount0, amount1 := pool.Swap(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		adminAddr,
+		true,
+		"1234567",
+		MIN_PRICE,
+		func(cur realm, amount0Delta, amount1Delta int64, _ *pool.CallbackMarker) error {
+			return mockSwapCallback(cur, barPath, fooPath, amount0Delta, amount1Delta, true)
+		},
+	)
+
+	ufmt.Printf("[EXPECTED] Swap amount0 should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Swap amount1 should be %s\n", amount1)
+}
+
+func checkFeesAfterSwap(cur realm) {
+	testing.SetRealm(adminRealm)
+	foo.Approve(cross(cur), poolAddr, INT64_MAX)
+	bar.Approve(cross(cur), poolAddr, INT64_MAX)
+
+	ufmt.Println("[INFO] Checking fees for position 1")
+	_, fee0, fee1, _, _, _ := position.CollectFee(cross(cur), 1)
+	ufmt.Printf("[EXPECTED] Fee0 should be %s\n", fee0)
+	ufmt.Printf("[EXPECTED] Fee1 should be %s\n", fee1)
+
+	ufmt.Println("[INFO] Checking fees for position 2")
+	_, fee0, fee1, _, _, _ = position.CollectFee(cross(cur), 2)
+	ufmt.Printf("[EXPECTED] Fee0 should be %s\n", fee0)
+	ufmt.Printf("[EXPECTED] Fee1 should be %s\n", fee1)
+}
+
+func mockSwapCallback(cur realm, token0Path string, token1Path string, amount0Delta int64, amount1Delta int64, zeroForOne bool) error {
+	testing.SetRealm(adminRealm)
+
+	if amount0Delta > 0 {
+		common.SafeGRC20Transfer(cross(cur), token0Path, poolAddr, amount0Delta)
+	}
+
+	if amount1Delta > 0 {
+		common.SafeGRC20Transfer(cross(cur), token1Path, poolAddr, amount1Delta)
+	}
+
+	return nil
+}
+
+// Output:
+// [SCENARIO] 1. Initialize pool with tick 10000
+// [INFO] Creating pool at tick 10000
+//
+// [SCENARIO] 2. Mint wide range position (8000~12000)
+// [INFO] Minting position with wide range
+// [EXPECTED] Position ID should be 1
+// [EXPECTED] Liquidity should be 318704392
+// [EXPECTED] Amount0 should be 18394892
+// [EXPECTED] Amount1 should be 50000000
+//
+// [SCENARIO] 3. Mint tight range position (9500~10500)
+// [INFO] Minting position with tight range
+// [EXPECTED] Position ID should be 2
+// [EXPECTED] Liquidity should be 1228379121
+// [EXPECTED] Amount0 should be 18394892
+// [EXPECTED] Amount1 should be 50000000
+//
+// [SCENARIO] 4. Check fees before swap
+// [INFO] Checking fees for position 1
+// [EXPECTED] Fee0 should be 0
+// [EXPECTED] Fee1 should be 0
+// [INFO] Checking fees for position 2
+// [EXPECTED] Fee0 should be 0
+// [EXPECTED] Fee1 should be 0
+//
+// [SCENARIO] 5. Execute swap
+// [INFO] Executing swap
+// [EXPECTED] Swap amount0 should be 1234567
+// [EXPECTED] Swap amount1 should be -3349648
+//
+// [SCENARIO] 6. Check fee distribution after swap
+// [INFO] Checking fees for position 1
+// [EXPECTED] Fee0 should be 126
+// [EXPECTED] Fee1 should be 0
+// [INFO] Checking fees for position 2
+// [EXPECTED] Fee0 should be 486
+// [EXPECTED] Fee1 should be 0

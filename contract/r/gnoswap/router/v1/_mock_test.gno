@@ -1,0 +1,158 @@
+package router
+
+import (
+	"strconv"
+
+	"gno.land/p/demo/tokens/grc721"
+	bptree "gno.land/p/nt/bptree/v0"
+	"gno.land/r/gnoswap/position"
+	"gno.land/r/gnoswap/router"
+)
+
+// Mock Position Store
+type mockPositionStore struct {
+	positions *bptree.BPTree
+	nextID    uint64
+}
+
+func (s *mockPositionStore) HasPositionsStoreKey() bool {
+	return false
+}
+
+func (s *mockPositionStore) GetPositions() *bptree.BPTree {
+	return s.positions
+}
+
+func (s *mockPositionStore) SetPositions(_ int, rlm realm, positions *bptree.BPTree) error {
+	s.positions = positions
+	return nil
+}
+
+func (s *mockPositionStore) HasPositionNextIDStoreKey() bool {
+	return false
+}
+
+func (s *mockPositionStore) GetPositionNextID() uint64 {
+	return s.nextID
+}
+
+func (s *mockPositionStore) SetPositionNextID(_ int, rlm realm, nextID uint64) error {
+	s.nextID = nextID
+	return nil
+}
+
+func (s *mockPositionStore) HasPosition(positionId uint64) bool {
+	return s.positions.Has(strconv.FormatUint(positionId, 10))
+}
+
+func (s *mockPositionStore) GetPosition(positionId uint64) (position.Position, bool) {
+	value := s.positions.Get(strconv.FormatUint(positionId, 10))
+	if value == nil {
+		return position.Position{}, false
+	}
+	return value.(position.Position), true
+}
+
+func (s *mockPositionStore) SetPosition(_ int, rlm realm, positionId uint64, position position.Position) error {
+	s.positions.Set(strconv.FormatUint(positionId, 10), position)
+	return nil
+}
+
+func (s *mockPositionStore) RemovePosition(_ int, rlm realm, positionId uint64) error {
+	s.positions.Remove(strconv.FormatUint(positionId, 10))
+	return nil
+}
+
+func newmockPositionStore() position.IPositionStore {
+	return &mockPositionStore{positions: position.NewPositionsTree(), nextID: 1}
+}
+
+// Mock Router Store
+type mockRouterStore struct {
+	data map[string]any
+}
+
+func (r *mockRouterStore) HasSwapFeeKey() bool {
+	return r.data[router.StoreKeySwapFee.String()] != nil
+}
+
+func (r *mockRouterStore) GetSwapFee() uint64 {
+	return r.data[router.StoreKeySwapFee.String()].(uint64)
+}
+
+func (r *mockRouterStore) SetSwapFee(_ int, rlm realm, fee uint64) error {
+	r.data[router.StoreKeySwapFee.String()] = fee
+	return nil
+}
+
+func (r *mockRouterStore) HasPendingProtocolFeesKey() bool {
+	return r.data[router.StoreKeyPendingProtocolFees.String()] != nil
+}
+
+func (r *mockRouterStore) GetPendingProtocolFees() map[string]int64 {
+	return r.data[router.StoreKeyPendingProtocolFees.String()].(map[string]int64)
+}
+
+func (r *mockRouterStore) SetPendingProtocolFees(_ int, rlm realm, fees map[string]int64) error {
+	r.data[router.StoreKeyPendingProtocolFees.String()] = fees
+	return nil
+}
+
+// Mock NFT Accessor
+type mockNFTAccessor struct {
+	approved map[grc721.TokenID]map[address]bool
+	owners   map[grc721.TokenID]address
+}
+
+func (n *mockNFTAccessor) Approve(_ int, rlm realm, approved address, tid grc721.TokenID) error {
+	n.approved[tid][approved] = true
+	return nil
+}
+
+func (n *mockNFTAccessor) Mint(_ int, rlm realm, to address, tid grc721.TokenID) grc721.TokenID {
+	n.owners[tid] = to
+	n.approved[tid] = make(map[address]bool)
+	return tid
+}
+
+func (n *mockNFTAccessor) Burn(_ int, rlm realm, tid grc721.TokenID) {
+	delete(n.owners, tid)
+	delete(n.approved, tid)
+}
+
+func (n *mockNFTAccessor) TotalSupply() int64 {
+	return int64(len(n.owners))
+}
+
+func (n *mockNFTAccessor) Exists(tid grc721.TokenID) bool {
+	return n.owners[tid] != ""
+}
+
+func (n *mockNFTAccessor) OwnerOf(tid grc721.TokenID) (address, error) {
+	if _, ok := n.owners[tid]; !ok {
+		return "", grc721.ErrCallerIsNotOwner
+	}
+
+	return n.owners[tid], nil
+}
+
+func mockRouter() *routerV1 {
+	return &routerV1{store: newMockRouterStore()}
+}
+
+func newMockPositionStore() *mockPositionStore {
+	return &mockPositionStore{positions: position.NewPositionsTree(), nextID: 1}
+}
+
+// Initialize Mock Instances
+func newMockRouterStore() *mockRouterStore {
+	data := make(map[string]any)
+	data[router.StoreKeySwapFee.String()] = uint64(15) // 0.15%
+	data[router.StoreKeyPendingProtocolFees.String()] = make(map[string]int64)
+
+	return &mockRouterStore{data: data}
+}
+
+func newMockNFTAccessor() *mockNFTAccessor {
+	return &mockNFTAccessor{approved: make(map[grc721.TokenID]map[address]bool), owners: make(map[grc721.TokenID]address)}
+}

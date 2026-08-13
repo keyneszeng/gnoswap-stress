@@ -1,0 +1,140 @@
+// PKGPATH: gno.land/r/demo/main
+
+package main
+
+import (
+	"gno.land/p/gnoswap/gnsmath"
+	"testing"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/pool"
+
+	"gno.land/r/gnoswap/gns"
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/baz"
+	"gno.land/r/onbloc/foo"
+)
+
+// Constants for fee tiers
+const (
+	fee500 uint32 = 500
+)
+
+// Constants for addresses and approvals
+const (
+	maxApprove int64 = 9223372036854775806
+)
+
+// Variables for test addresses and realms
+var (
+	adminAddr, _    = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm      = testing.NewUserRealm(adminAddr)
+	positionAddr, _ = access.GetAddress(prbac.ROLE_POSITION.String())
+	posRealm        = testing.NewUserRealm(positionAddr)
+	poolAddr, _     = access.GetAddress(prbac.ROLE_POOL.String())
+)
+
+var (
+	fooPath = "gno.land/r/onbloc/foo.FOO"
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	bazPath = "gno.land/r/onbloc/baz.BAZ"
+)
+
+var (
+	tickLower       = int32(9000)
+	tickUpper       = int32(11000)
+	liquidityExpect = "100000000"
+
+	poolCreationFee = int64(100_000_000)
+)
+
+// 1. Create Foo:Bar Pool
+func main(cur realm) {
+	// call gns faucet to get creation fee
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Create Foo:Bar Pool")
+	gns.Approve(cross(cur), poolAddr, poolCreationFee)
+	pool.CreatePool(cross(cur), barPath, fooPath, fee500, gnsmath.TickMathGetSqrtRatioAtTick(-10000).ToString()) // tick -10000
+	testing.SkipHeights(1)
+
+	println("[INFO] Create Bar:Baz Pool")
+	gns.Approve(cross(cur), poolAddr, poolCreationFee)
+	pool.CreatePool(cross(cur), barPath, bazPath, fee500, "130621891405341611593710811006")
+	testing.SkipHeights(1)
+
+	println("[SCENARIO] 1. Mint Foo:Bar Liquidity by admin")
+	TestMintFooBarLiquidity(cur)
+
+	println("[SCENARIO] 2. Mint Bar:Baz Liquidity by admin")
+	TestMintBarBazLiquidity(cur)
+
+	println("[INFO] Passed all tests")
+}
+
+// 3. Mint Foo:Bar Liquidity by admin
+func TestMintFooBarLiquidity(cur realm) {
+	testing.SetRealm(adminRealm)
+	foo.Approve(cross(cur), poolAddr, maxApprove)
+	bar.Approve(cross(cur), poolAddr, maxApprove)
+	testing.SkipHeights(4)
+
+	testing.SetRealm(posRealm)
+	amount0, amount1 := pool.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		-11000,
+		-9000,
+		liquidityExpect,
+		adminAddr,
+	)
+	println("[EXPECTED] amount0:", amount0, "expected: should be 8040316")
+	println("[EXPECTED] amount1:", amount1, "expected: should be 2958015")
+	println()
+	testing.SkipHeights(1)
+}
+
+// 4. Mint Bar:Baz Liquidity by admin
+func TestMintBarBazLiquidity(cur realm) {
+	testing.SetRealm(adminRealm)
+	bar.Approve(cross(cur), poolAddr, maxApprove)
+	baz.Approve(cross(cur), poolAddr, maxApprove)
+	testing.SkipHeights(2)
+
+	testing.SetRealm(posRealm)
+	amount0, amount1 := pool.Mint(
+		cross(cur),
+		barPath,
+		bazPath,
+		fee500,
+		tickLower,
+		tickUpper,
+		liquidityExpect,
+		adminAddr,
+	)
+	println("[EXPECTED] amount0:", amount0, "expected: should be 2958015")
+	println("[EXPECTED] amount1:", amount1, "expected: should be 8040316")
+	println()
+	testing.SkipHeights(1)
+}
+
+// Output:
+// [INFO] Create Foo:Bar Pool
+// [INFO] Create Bar:Baz Pool
+// [SCENARIO] 1. Mint Foo:Bar Liquidity by admin
+// [EXPECTED] amount0: 8040316 expected: should be 8040316
+// [EXPECTED] amount1: 2958015 expected: should be 2958015
+//
+// [SCENARIO] 2. Mint Bar:Baz Liquidity by admin
+// [EXPECTED] amount0: 2958015 expected: should be 2958015
+// [EXPECTED] amount1: 8040316 expected: should be 8040316
+//
+// [INFO] Passed all tests

@@ -1,0 +1,263 @@
+// complex protocol fee reward
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"chain"
+	"chain/banker"
+	"testing"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	"gno.land/r/gnoswap/access"
+
+	en "gno.land/r/gnoswap/emission"
+
+	pf "gno.land/r/gnoswap/protocol_fee"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+
+	"gno.land/r/gnoswap/gov/staker"
+	_ "gno.land/r/gnoswap/gov/staker/v1"
+
+	"gno.land/r/gnoland/wugnot"
+	"gno.land/r/gnoswap/gns"
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/qux"
+)
+
+var t *testing.T
+
+var (
+	adminAddr  = access.MustGetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm = testing.NewUserRealm(adminAddr)
+
+	stakerAddr  = access.MustGetAddress(prbac.ROLE_STAKER.String())
+	stakerRealm = testing.NewUserRealm(stakerAddr)
+
+	dummyAddr   = testutils.TestAddress("dummy")
+	dummyRealm  = testing.NewUserRealm(dummyAddr)
+	dummy2Addr  = testutils.TestAddress("dummy2")
+	dummy2Realm = testing.NewUserRealm(dummy2Addr)
+
+	minAmount = int64(1_000_000)
+
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	quxPath = "gno.land/r/onbloc/qux.QUX"
+
+	wugnotPath         = "gno.land/r/gnoland/wugnot.wugnot"
+	wugnotAddr address = "g15vj5q08amlvyd0nx6zjgcvwq2d0gt9fcchrvum"
+
+	govStakerAddr, _ = access.GetAddress(prbac.ROLE_GOV_STAKER.String())
+
+	protocolFeeAddr, _ = access.GetAddress(prbac.ROLE_PROTOCOL_FEE.String())
+	protocolFeeV1Realm = testing.NewCodeRealm("gno.land/r/gnoswap/protocol_fee/v1")
+)
+
+func fundAndApproveProtocolFeeCallerBar(cur realm, amount int64) {
+	testing.SetRealm(adminRealm)
+	bar.Transfer(cross(cur), stakerAddr, amount)
+	testing.SetRealm(stakerRealm)
+	bar.Approve(cross(cur), protocolFeeAddr, amount)
+	bar.Approve(cross(cur), protocolFeeV1Realm.Address(), amount)
+}
+
+func fundAndApproveProtocolFeeCallerQux(cur realm, amount int64) {
+	testing.SetRealm(adminRealm)
+	qux.Transfer(cross(cur), stakerAddr, amount)
+	testing.SetRealm(stakerRealm)
+	qux.Approve(cross(cur), protocolFeeAddr, amount)
+	qux.Approve(cross(cur), protocolFeeV1Realm.Address(), amount)
+}
+
+func fundAndApproveProtocolFeeCallerWugnot(cur realm, amount int64) {
+	testing.SetRealm(adminRealm)
+	wugnot.Transfer(cross(cur), stakerAddr, amount)
+	testing.SetRealm(stakerRealm)
+	wugnot.Approve(cross(cur), protocolFeeAddr, amount)
+	wugnot.Approve(cross(cur), protocolFeeV1Realm.Address(), amount)
+}
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Prepare protocol fee tokens (WUGNOT, bar, qux)")
+	setupTokens(cur)
+	println()
+
+	println("[SCENARIO] 2. Admin delegates GNS to dummy2")
+	delegateAdminToDummy2(cur)
+	println()
+
+	println("[SCENARIO] 3. Dummy delegates GNS to dummy")
+	delegateDummyToDummy(cur)
+	println()
+
+	println("[SCENARIO] 4. Protocol fee deposit")
+	depositProtocolFeePre(cur)
+	// Deposit must be called from main(cur) due to AssertOriginCall frame limit
+	testing.SetRealm(adminRealm)
+	testing.SetOriginSend(chain.Coins{{"ugnot", 10000}})
+	wugnot.Deposit(cross(cur))
+	testing.SetOriginSend(chain.Coins{})
+	depositProtocolFeePost(cur)
+	println()
+
+	println("[SCENARIO] 5. Skip blocks and distribute emission/protocol fee")
+	skipBlocksAndDistribute(cur)
+	println()
+
+	println("[SCENARIO] 6. Collect rewards")
+	collectRewardsByDummy(cur)
+	println()
+
+	println("[SCENARIO] 7. Additional protocol fee deposit")
+	depositProtocolFeeAdditional(cur)
+	println()
+
+	println("[SCENARIO] 8. Collect rewards after additional protocol fee")
+	collectRewardsByDummy(cur)
+	println()
+
+	println("[SCENARIO] 9. Admin undelegates dummy2 and collects reward")
+	unDelegateAndCollectRewardByAdmin(cur)
+	println()
+}
+
+func setupTokens(cur realm) {
+	println("[INFO] WUGNOT token issued for protocol fee")
+}
+
+func delegateAdminToDummy2(cur realm) {
+	testing.SetRealm(adminRealm)
+	gns.Approve(cross(cur), govStakerAddr, minAmount)
+	staker.Delegate(cross(cur), dummy2Addr, int64(minAmount), "")
+	ufmt.Printf("[INFO] delegated %d GNS from admin to dummy2\n", minAmount)
+}
+
+func delegateDummyToDummy(cur realm) {
+	testing.SetRealm(adminRealm)
+	amount := 5 * minAmount
+	gns.Transfer(cross(cur), dummyAddr, amount)
+
+	testing.SetRealm(dummyRealm)
+	gns.Approve(cross(cur), govStakerAddr, amount)
+	staker.Delegate(cross(cur), dummyAddr, int64(amount), "")
+	ufmt.Printf("[INFO] delegated %d GNS from dummy to dummy\n", amount)
+}
+
+func depositProtocolFeePre(cur realm) {
+	// protocol fee deposit (bar, qux, wugnot)
+	testing.SetRealm(adminRealm)
+	bar.Transfer(cross(cur), stakerAddr, 1000)
+	qux.Transfer(cross(cur), stakerAddr, 2500)
+
+	coins := chain.Coins{{"ugnot", 10000}}
+	testing.IssueCoins(adminAddr, coins)
+	banker_ := banker.NewBanker(banker.BankerTypeRealmSend, cur)
+	banker_.SendCoins(adminAddr, wugnotAddr, coins)
+	// Deposit is done in main(cur)
+}
+
+func depositProtocolFeePost(cur realm) {
+	fundAndApproveProtocolFeeCallerWugnot(cur, 10000)
+	testing.SetRealm(stakerRealm)
+	bar.Approve(cross(cur), protocolFeeAddr, 1000)
+	qux.Approve(cross(cur), protocolFeeAddr, 2500)
+	wugnot.Approve(cross(cur), protocolFeeAddr, 10000)
+	pf.AddToProtocolFee(cross(cur), barPath, 1000)
+	pf.AddToProtocolFee(cross(cur), quxPath, 2500)
+	pf.AddToProtocolFee(cross(cur), wugnotPath, 10000)
+
+	currentBarBalance := bar.BalanceOf(protocolFeeAddr)
+	currentQuxBalance := qux.BalanceOf(protocolFeeAddr)
+	currentWugnotBalance := wugnot.BalanceOf(protocolFeeAddr)
+
+	ufmt.Printf("[INFO] protocol fee deposited: bar(%d), qux(%d), wugnot(%d)\n", currentBarBalance, currentQuxBalance, currentWugnotBalance)
+}
+
+func skipBlocksAndDistribute(cur realm) {
+	testing.SkipHeights(10)
+	en.MintAndDistributeGns(cross(cur))
+	testing.SkipHeights(1)
+	println("[INFO] skipped 10+1 blocks and distributed emission/protocol fee")
+}
+
+func depositProtocolFeeAdditional(cur realm) {
+	// additional protocol fee deposit (bar, qux)
+	fundAndApproveProtocolFeeCallerBar(cur, 2500)
+	fundAndApproveProtocolFeeCallerQux(cur, 4000)
+	testing.SetRealm(stakerRealm)
+	bar.Approve(cross(cur), protocolFeeAddr, 2500)
+	qux.Approve(cross(cur), protocolFeeAddr, 4000)
+	pf.AddToProtocolFee(cross(cur), barPath, 2500)
+	pf.AddToProtocolFee(cross(cur), quxPath, 4000)
+
+	currentBarBalance := bar.BalanceOf(protocolFeeAddr)
+	currentQuxBalance := qux.BalanceOf(protocolFeeAddr)
+	currentWugnotBalance := wugnot.BalanceOf(protocolFeeAddr)
+
+	ufmt.Printf("[INFO] protocol fee deposited: bar(%d), qux(%d), wugnot(%d)\n", currentBarBalance, currentQuxBalance, currentWugnotBalance)
+}
+
+func collectRewardsByDummy(cur realm) {
+	testing.SetOriginCaller(dummyAddr)
+	testing.SkipHeights(1)
+
+	prevBarBalance := bar.BalanceOf(dummyAddr)
+	prevQuxBalance := qux.BalanceOf(dummyAddr)
+
+	staker.CollectReward(cross(cur))
+
+	afterBarBalance := bar.BalanceOf(dummyAddr)
+	afterQuxBalance := qux.BalanceOf(dummyAddr)
+
+	ufmt.Printf("[INFO] collected more protocol fee reward for dummy: bar(%d), qux(%d)\n", afterBarBalance-prevBarBalance, afterQuxBalance-prevQuxBalance)
+}
+
+func unDelegateAndCollectRewardByAdmin(cur realm) {
+	testing.SetRealm(adminRealm)
+	testing.SkipHeights(1)
+
+	prevBarBalance := bar.BalanceOf(adminAddr)
+	prevQuxBalance := qux.BalanceOf(adminAddr)
+
+	staker.Undelegate(cross(cur), adminAddr, int64(minAmount))
+	staker.CollectReward(cross(cur))
+
+	afterBarBalance := bar.BalanceOf(adminAddr)
+	afterQuxBalance := qux.BalanceOf(adminAddr)
+
+	ufmt.Printf("[INFO] admin undelegated %d GNS from dummy2: bar(%d), qux(%d)\n", minAmount, afterBarBalance-prevBarBalance, afterQuxBalance-prevQuxBalance)
+}
+
+// Output:
+// [SCENARIO] 1. Prepare protocol fee tokens (WUGNOT, bar, qux)
+// [INFO] WUGNOT token issued for protocol fee
+//
+// [SCENARIO] 2. Admin delegates GNS to dummy2
+// [INFO] delegated 1000000 GNS from admin to dummy2
+//
+// [SCENARIO] 3. Dummy delegates GNS to dummy
+// [INFO] delegated 5000000 GNS from dummy to dummy
+//
+// [SCENARIO] 4. Protocol fee deposit
+// [INFO] protocol fee deposited: bar(1000), qux(2500), wugnot(10000)
+//
+// [SCENARIO] 5. Skip blocks and distribute emission/protocol fee
+// [INFO] skipped 10+1 blocks and distributed emission/protocol fee
+//
+// [SCENARIO] 6. Collect rewards
+// [INFO] collected more protocol fee reward for dummy: bar(833), qux(2083)
+//
+// [SCENARIO] 7. Additional protocol fee deposit
+// [INFO] protocol fee deposited: bar(2500), qux(4000), wugnot(0)
+//
+// [SCENARIO] 8. Collect rewards after additional protocol fee
+// [INFO] collected more protocol fee reward for dummy: bar(2083), qux(3333)
+//
+// [SCENARIO] 9. Admin undelegates dummy2 and collects reward
+// [INFO] admin undelegated 1000000 GNS from dummy2: bar(583), qux(1083)

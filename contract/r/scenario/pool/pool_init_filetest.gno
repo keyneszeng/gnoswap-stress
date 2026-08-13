@@ -1,0 +1,278 @@
+// PKGPATH: gno.land/r/demo/main
+
+package main
+
+import (
+	"testing"
+
+	"gno.land/p/gnoswap/gnsmath"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/common"
+	"gno.land/r/gnoswap/pool"
+
+	"gno.land/r/gnoswap/gns"
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/foo"
+)
+
+// Constants for addresses and approvals
+const (
+	maxApprove int64 = 9223372036854775806
+)
+
+// Variables for test addresses and realms
+var (
+	adminAddr, _    = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm      = testing.NewUserRealm(adminAddr)
+	positionAddr, _ = access.GetAddress(prbac.ROLE_POSITION.String())
+	posRealm        = testing.NewUserRealm(positionAddr)
+	routerAddr, _   = access.GetAddress(prbac.ROLE_ROUTER.String())
+	rouRealm        = testing.NewUserRealm(routerAddr)
+	poolAddr, _     = access.GetAddress(prbac.ROLE_POOL.String())
+
+	poolCreationFee int64 = 100_000_000
+)
+
+// Token paths
+var (
+	fooPath = "gno.land/r/onbloc/foo.FOO"
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	bazPath = "gno.land/r/onbloc/baz.BAZ"
+)
+
+var (
+	test_tickLower          = int32(-6000)
+	test_tickUpper          = int32(6000)
+	test_liquidityExpectStr = "1000"
+
+	fee500 = uint32(500)
+
+	minPrice = "4295128740"                                        // MIN_SQRT_RATIO + 1
+	maxPrice = "1461446703485210103287273052203988822378723970341" // MAX_SQRT_RATIO - 1
+)
+
+func main(cur realm) {
+	println("[SCENARIO] #1 Pool Initialization Test")
+	println("[INFO] Starting scenario: Pool initialization and liquidity management tests")
+
+	println("[INFO] Setting up pool and initial position")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Approving pool creation fee")
+	gns.Approve(cross(cur), poolAddr, poolCreationFee)
+	println("[INFO] Creating bar-foo pool (fee: 500, tick: -1)")
+	pool.CreatePool(cross(cur), barPath, fooPath, fee500, gnsmath.TickMathGetSqrtRatioAtTick(-1).ToString())
+
+	println("[INFO] Approving tokens for pool operations")
+	foo.Approve(cross(cur), poolAddr, maxApprove)
+	bar.Approve(cross(cur), poolAddr, maxApprove)
+
+	thisPool, _ := pool.GetPool(barPath, fooPath, fee500)
+
+	println("[INFO] Test 1: Minting position in range")
+	// 1. returns in supply in range
+	testing.SetRealm(posRealm)
+	pool.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		-1000,
+		1000,
+		test_liquidityExpectStr,
+		adminAddr,
+	)
+
+	thisPool, _ = pool.GetPool(barPath, fooPath, fee500)
+	currentLiq := thisPool.Liquidity().ToString()
+	println("[INFO] Current liquidity:", currentLiq)
+	println()
+
+	println("[INFO] Test 2: Minting position above current tick")
+	// 2. excludes supply at tick above current tick
+	pool.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		-2000,
+		-1000,
+		test_liquidityExpectStr,
+		adminAddr,
+	)
+
+	thisPool, _ = pool.GetPool(barPath, fooPath, fee500)
+	nowLiq := thisPool.Liquidity().ToString()
+	println("[INFO] Current liquidity:", currentLiq)
+	println("[INFO] Now liquidity:", nowLiq)
+	println("[EXPECTED] Current liquidity should be equal to now liquidity")
+	println("[EXPECTED] Liquidity comparison:", currentLiq, "==", nowLiq)
+	println()
+
+	println("[INFO] Test 3: Minting position below current tick")
+	// 3. excludes supply at tick below current tick
+	pool.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		1000,
+		2000,
+		test_liquidityExpectStr,
+		adminAddr,
+	)
+
+	thisPool, _ = pool.GetPool(barPath, fooPath, fee500)
+	nowLiq = thisPool.Liquidity().ToString()
+	println("[INFO] Current liquidity:", currentLiq)
+	println("[INFO] Now liquidity:", nowLiq)
+	println("[EXPECTED] Current liquidity should be equal to now liquidity")
+	println("[EXPECTED] Liquidity comparison:", currentLiq, "==", nowLiq)
+	println()
+
+	println("[INFO] Test 4: Updating liquidity when exiting range")
+	// 4. updates correctly when exiting range
+	beforeLiq := thisPool.Liquidity().ToString()
+	println("[INFO] Before liquidity:", beforeLiq)
+
+	testing.SetRealm(posRealm)
+	pool.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		0,
+		100,
+		test_liquidityExpectStr,
+		adminAddr,
+	)
+
+	thisPool, _ = pool.GetPool(barPath, fooPath, fee500)
+	nowLiq = thisPool.Liquidity().ToString()
+	println("[INFO] Now liquidity:", nowLiq)
+
+	// set current realm and origin caller
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/gnoswap/router"))
+	println("[INFO] Executing swap to move tick")
+	pool.Swap(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		adminAddr,
+		true,
+		"5",
+		minPrice,
+		func(cur realm, amount0Delta, amount1Delta int64, _ *pool.CallbackMarker) error {
+			return mockSwapCallback(cur, barPath, fooPath, amount0Delta, amount1Delta)
+		},
+	)
+
+	testing.SetRealm(adminRealm)
+	thisPool, _ = pool.GetPool(barPath, fooPath, fee500)
+	poolTick := thisPool.Slot0Tick()
+	println("[EXPECTED] Pool tick:", poolTick, "expected: -81")
+	println()
+
+	println("[INFO] Test 5: Updating liquidity when entering range")
+	// 5. updates correctly when entering range
+	beforeLiq = thisPool.Liquidity().ToString()
+	println("[INFO] Before liquidity:", beforeLiq)
+
+	testing.SetRealm(posRealm)
+	pool.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		-100,
+		0,
+		test_liquidityExpectStr,
+		adminAddr,
+	)
+
+	thisPool, _ = pool.GetPool(barPath, fooPath, fee500)
+	nowLiq = thisPool.Liquidity().ToString()
+	println("[INFO] Now liquidity:", nowLiq)
+
+	// set current realm and origin caller
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/gnoswap/router"))
+	println("[INFO] Executing swap to move tick")
+	pool.Swap(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		adminAddr,
+		true,
+		"5",
+		minPrice,
+		func(cur realm, amount0Delta, amount1Delta int64, _ *pool.CallbackMarker) error {
+			return mockSwapCallback(cur, barPath, fooPath, amount0Delta, amount1Delta)
+		},
+	)
+
+	testing.SetRealm(adminRealm)
+	thisPool, _ = pool.GetPool(barPath, fooPath, fee500)
+	poolTick = thisPool.Slot0Tick()
+	println("[EXPECTED] Pool tick:", poolTick, "expected: -120")
+	println()
+
+	println("[INFO] Scenario completed")
+}
+
+func mockSwapCallback(cur realm, token0Path string, token1Path string, amount0Delta int64, amount1Delta int64) error {
+	testing.SetRealm(adminRealm)
+
+	if amount0Delta > 0 {
+		common.SafeGRC20Transfer(cross(cur), token0Path, poolAddr, amount0Delta)
+	}
+	if amount1Delta > 0 {
+		common.SafeGRC20Transfer(cross(cur), token1Path, poolAddr, amount1Delta)
+	}
+
+	return nil
+}
+
+// Output:
+// [SCENARIO] #1 Pool Initialization Test
+// [INFO] Starting scenario: Pool initialization and liquidity management tests
+// [INFO] Setting up pool and initial position
+// [INFO] Approving pool creation fee
+// [INFO] Creating bar-foo pool (fee: 500, tick: -1)
+// [INFO] Approving tokens for pool operations
+// [INFO] Test 1: Minting position in range
+// [INFO] Current liquidity: 1000
+//
+// [INFO] Test 2: Minting position above current tick
+// [INFO] Current liquidity: 1000
+// [INFO] Now liquidity: 1000
+// [EXPECTED] Current liquidity should be equal to now liquidity
+// [EXPECTED] Liquidity comparison: 1000 == 1000
+//
+// [INFO] Test 3: Minting position below current tick
+// [INFO] Current liquidity: 1000
+// [INFO] Now liquidity: 1000
+// [EXPECTED] Current liquidity should be equal to now liquidity
+// [EXPECTED] Liquidity comparison: 1000 == 1000
+//
+// [INFO] Test 4: Updating liquidity when exiting range
+// [INFO] Before liquidity: 1000
+// [INFO] Now liquidity: 1000
+// [INFO] Executing swap to move tick
+// [EXPECTED] Pool tick: -81 expected: -81
+//
+// [INFO] Test 5: Updating liquidity when entering range
+// [INFO] Before liquidity: 1000
+// [INFO] Now liquidity: 2000
+// [INFO] Executing swap to move tick
+// [EXPECTED] Pool tick: -120 expected: -120
+//
+// [INFO] Scenario completed

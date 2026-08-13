@@ -1,0 +1,275 @@
+// short warm-up period internal ugnot:gns:3000 scenario test
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"chain"
+	"chain/banker"
+	"chain/runtime"
+	"math"
+	"strconv"
+	"testing"
+	"time"
+
+	"gno.land/p/gnoswap/gnsmath"
+	"gno.land/r/gnoswap/scenarioutils"
+
+	"gno.land/p/demo/tokens/grc721"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/r/gnoland/wugnot"
+
+	"gno.land/r/gnoswap/access"
+
+	"gno.land/r/gnoswap/emission"
+	"gno.land/r/gnoswap/gnft"
+	"gno.land/r/gnoswap/gns"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	sr "gno.land/r/gnoswap/staker"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminUser    = adminAddr
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	stakerAddr, _ = access.GetAddress(prabc.ROLE_STAKER.String())
+	stakerUser    = stakerAddr
+	stakerRealm   = testing.NewCodeRealm("gno.land/r/gnoswap/staker")
+
+	poolAddr, _ = access.GetAddress(prabc.ROLE_POOL.String())
+
+	gnsPath = "gno.land/r/gnoswap/gns.GNS"
+
+	wugnotPath         = "gno.land/r/gnoland/wugnot.wugnot"
+	wugnotAddr address = "g15vj5q08amlvyd0nx6zjgcvwq2d0gt9fcchrvum"
+
+	fee3000 uint32 = 3000
+
+	maxTimeout int64 = 9999999999
+	maxInt64   int64 = 9223372036854775807
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Initialize and setup short warm-up periods")
+	initWithShortWarmUp(cur)
+	// Deposit must be called from main(cur) due to AssertOriginCall frame limit
+	testing.SetRealm(adminRealm)
+	testing.SetOriginSend(chain.Coins{{"ugnot", 50_000_000_000_000}})
+	wugnot.Deposit(cross(cur))
+	testing.SetOriginSend(chain.Coins{})
+	initWithShortWarmUpPostDeposit(cur)
+	println()
+
+	println("[SCENARIO] 2. Create wugnot:gns:3000 pool")
+	createPool(cur)
+	println()
+
+	println("[SCENARIO] 3. Mint wugnot:gns position 01")
+	mintWugnotGnsPos01(cur)
+	println()
+
+	println("[SCENARIO] 4. Stake token 01")
+	stakeToken01(cur)
+	println()
+
+	println("[SCENARIO] 5. Collect reward")
+	collectReward01(cur)
+}
+
+func initWithShortWarmUp(cur realm) {
+	testing.SetRealm(adminRealm)
+	scenarioutils.EnsureCanonicalDefaultPool(cross(cur))
+	emission.SetDistributionStartTime(cross(cur), time.Now().Unix()+1)
+
+	println("[INFO] override warm-up periods for testing")
+	sr.SetWarmUp(cross(cur), 30, 150)
+	sr.SetWarmUp(cross(cur), 50, 300)
+	sr.SetWarmUp(cross(cur), 70, 900)
+	sr.SetWarmUp(cross(cur), 100, math.MaxInt64)
+
+	println("[INFO] set unstaking fee to 0")
+	sr.SetUnStakingFee(cross(cur), 0)
+
+	println("[INFO] set pool creation fee to 0")
+	pl.SetPoolCreationFee(cross(cur), 0)
+
+	println("[INFO] set community pool distribution to 0%")
+	emission.ChangeDistributionPct(
+		cross(cur),
+		7500, // liquidityStakerPct
+		2500, // devOpsPct
+		0,    // communityPoolPct
+		0,    // govStakerPct
+	)
+
+	println("[INFO] prepare wugnot")
+	testing.IssueCoins(adminAddr, chain.Coins{{"ugnot", 100_000_000_000_000}})
+	banker_ := banker.NewBanker(banker.BankerTypeRealmSend, cur)
+	banker_.SendCoins(adminAddr, wugnotAddr, chain.Coins{{"ugnot", 50_000_000_000_000}})
+	// Deposit is done in main(cur)
+}
+
+func initWithShortWarmUpPostDeposit(cur realm) {
+	testing.SetRealm(adminRealm)
+	wugnotBalance := wugnot.BalanceOf(adminAddr)
+	ufmt.Printf("[EXPECTED] wugnot balance: %d\n", wugnotBalance)
+
+	println("[INFO] register gns change callback")
+	testing.SetRealm(stakerRealm)
+
+	testing.SkipHeights(1)
+}
+
+func createPool(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] create wugnot:gns:3000 pool at tick 0")
+	poolPath := pl.GetPoolPath(wugnotPath, gnsPath, fee3000)
+	if !pl.ExistsPoolPath(poolPath) {
+		pl.CreatePool(cross(cur), wugnotPath, gnsPath, fee3000, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString())
+	}
+
+	testing.SkipHeights(1)
+	ufmt.Printf("[INFO] pool created, current height: %d\n", runtime.ChainHeight())
+}
+
+func mintWugnotGnsPos01(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve tokens for minting")
+	wugnot.Approve(cross(cur), poolAddr, maxInt64)
+	gns.Approve(cross(cur), poolAddr, maxInt64)
+
+	println("[INFO] mint position 01 (tick range: -1020 ~ 1020)")
+	positionId, liquidity, amount0, amount1 := pn.Mint(
+		cross(cur),
+		wugnotPath,
+		gnsPath,
+		fee3000,
+		int32(-1020),
+		int32(1020),
+		"50",
+		"50",
+		"1",
+		"1",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position ID: %d\n", positionId)
+	ufmt.Printf("[EXPECTED] liquidity: %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] amount0: %s, amount1: %s\n", amount0, amount1)
+
+	owner := gnft.MustOwnerOf(positionIdFrom(cur, positionId))
+	ufmt.Printf("[EXPECTED] position owner: %s\n", owner)
+
+	testing.SkipHeights(1)
+}
+
+func stakeToken01(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve and stake token 01")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, 1))
+	sr.StakeToken(cross(cur), 1, "")
+
+	testing.SkipHeights(1)
+	ufmt.Printf("[INFO] token staked at height: %d\n", runtime.ChainHeight())
+}
+
+func collectReward01(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	communityPoolAddr, _ := access.GetAddress(prabc.ROLE_COMMUNITY_POOL.String())
+
+	println("[INFO] check GNS balances before reward collection")
+	gnsBefore := gns.BalanceOf(adminUser)
+	communityPoolBefore := gns.BalanceOf(communityPoolAddr)
+
+	ufmt.Printf("[INFO] user GNS balance before: %d\n", gnsBefore)
+	ufmt.Printf("[INFO] community pool GNS balance before: %d\n", communityPoolBefore)
+
+	println("[INFO] collect reward for position 01")
+	sr.CollectReward(cross(cur), 1)
+
+	gnsAfter := gns.BalanceOf(adminUser)
+	communityPoolAfter := gns.BalanceOf(communityPoolAddr)
+
+	userReward := gnsAfter - gnsBefore
+	communityReward := communityPoolAfter - communityPoolBefore
+
+	ufmt.Printf("[EXPECTED] user reward: %d\n", userReward)
+	ufmt.Printf("[EXPECTED] community pool reward: %d\n", communityReward)
+
+	// Expected: position receives 30% warm-up reward, 70% goes to community pool as penalty
+	// staker's emission reward per block: 10702054
+	// user should get ~3210616 (30%), community pool should get unclaimable rewards + penalty
+
+	testing.SkipHeights(1)
+}
+
+func positionIdFrom(cur realm, positionId any) grc721.TokenID {
+	if positionId == nil {
+		panic("positionId is nil")
+	}
+
+	switch positionId.(type) {
+	case string:
+		return grc721.TokenID(positionId.(string))
+	case int:
+		return grc721.TokenID(strconv.Itoa(positionId.(int)))
+	case uint64:
+		return grc721.TokenID(strconv.Itoa(int(positionId.(uint64))))
+	case grc721.TokenID:
+		return positionId.(grc721.TokenID)
+	default:
+		panic("unsupported positionId type")
+	}
+}
+
+// Output:
+// [SCENARIO] 1. Initialize and setup short warm-up periods
+// [INFO] override warm-up periods for testing
+// [INFO] set unstaking fee to 0
+// [INFO] set pool creation fee to 0
+// [INFO] set community pool distribution to 0%
+// [INFO] prepare wugnot
+// [EXPECTED] wugnot balance: 50000000000000
+// [INFO] register gns change callback
+//
+// [SCENARIO] 2. Create wugnot:gns:3000 pool
+// [INFO] create wugnot:gns:3000 pool at tick 0
+// [INFO] pool created, current height: 125
+//
+// [SCENARIO] 3. Mint wugnot:gns position 01
+// [INFO] approve tokens for minting
+// [INFO] mint position 01 (tick range: -1020 ~ 1020)
+// [EXPECTED] position ID: 1
+// [EXPECTED] liquidity: 1005
+// [EXPECTED] amount0: 50, amount1: 50
+// [EXPECTED] position owner: g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5
+//
+// [SCENARIO] 4. Stake token 01
+// [INFO] approve and stake token 01
+// [INFO] token staked at height: 127
+//
+// [SCENARIO] 5. Collect reward
+// [INFO] check GNS balances before reward collection
+// [INFO] user GNS balance before: 99999999999950
+// [INFO] community pool GNS balance before: 0
+// [INFO] collect reward for position 01
+// [EXPECTED] user reward: 8026540
+// [EXPECTED] community pool reward: 93642972

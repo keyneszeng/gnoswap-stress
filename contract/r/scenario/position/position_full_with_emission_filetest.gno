@@ -1,0 +1,294 @@
+// position full with emission test
+
+// PKGPATH: gno.land/r/demo/main
+
+package main
+
+import (
+	"chain"
+	"chain/banker"
+	"testing"
+	"time"
+
+	"gno.land/p/gnoswap/gnsmath"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/common"
+
+	"gno.land/r/gnoswap/pool"
+	"gno.land/r/gnoswap/position"
+
+	"gno.land/r/gnoland/wugnot"
+	"gno.land/r/gnoswap/gns"
+)
+
+const (
+	INT64_MAX int64 = 9223372036854775807
+
+	STAKER_PATH string  = "gno.land/r/gnoswap/staker"
+	WUGNOT_ADDR address = "g15vj5q08amlvyd0nx6zjgcvwq2d0gt9fcchrvum"
+
+	MIN_PRICE string = "4295128740"
+)
+
+var (
+	adminAddr, _  = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm    = testing.NewUserRealm(adminAddr)
+	poolAddr, _   = access.GetAddress(prbac.ROLE_POOL.String())
+	routerAddr, _ = access.GetAddress(prbac.ROLE_ROUTER.String())
+	routerRealm   = testing.NewUserRealm(routerAddr)
+
+	aliceAddr  = testutils.TestAddress("alice")
+	aliceRealm = testing.NewUserRealm(aliceAddr)
+	bobAddr    = testutils.TestAddress("bob")
+	bobRealm   = testing.NewUserRealm(bobAddr)
+
+	token0Path = "gno.land/r/gnoland/wugnot.wugnot"
+	token1Path = "gno.land/r/gnoswap/gns.GNS"
+	fee        = uint32(3000)
+)
+
+func main(cur realm) {
+	ufmt.Println("[SCENARIO] 1. Initialize pool and emission")
+	initPoolAndEmission(cur)
+
+	testing.SetRealm(adminRealm)
+	testing.SetOriginSend(chain.Coins{{"ugnot", 150000000}})
+
+	wugnot.Deposit(cross(cur))
+	testing.SetOriginSend(chain.Coins{})
+
+	initPoolAndEmissionPostDeposit(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 2. Mint position for Alice")
+	mintAlicePosition(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 3. Check initial emission state")
+	checkInitialEmissionState(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 4. Execute swaps to generate fees")
+	executeSwaps(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 5. Wait for emission period")
+	waitForEmissionPeriod(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 6. Collect fees and emission rewards")
+	collectFeesAndRewards(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 7. Verify final balances")
+	verifyFinalBalances(cur)
+	println()
+}
+
+func initPoolAndEmission(cur realm) {
+	testing.SetRealm(testing.NewCodeRealm(STAKER_PATH))
+
+	testing.SetRealm(adminRealm)
+
+	defaultTokenAmount := int64(50000000)
+
+	ufmt.Println("[INFO] Distributing GNS tokens")
+	gns.Transfer(cross(cur), aliceAddr, defaultTokenAmount)
+	gns.Transfer(cross(cur), bobAddr, defaultTokenAmount)
+
+	ufmt.Println("[INFO] Distributing WUGNOT tokens")
+
+	mintedGnotCoin := chain.Coins{{"ugnot", 100000000000000}}
+
+	testing.IssueCoins(adminAddr, mintedGnotCoin)
+
+	banker_ := banker.NewBanker(banker.BankerTypeRealmSend, cur)
+	banker_.SendCoins(adminAddr, WUGNOT_ADDR, chain.Coins{{"ugnot", defaultTokenAmount * 3}})
+}
+
+func initPoolAndEmissionPostDeposit(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	defaultTokenAmount := int64(50000000)
+	distributedGnotCoin := chain.Coins{{"ugnot", defaultTokenAmount}}
+
+	wugnot.Transfer(cross(cur), aliceAddr, defaultTokenAmount)
+
+	banker_ := banker.NewBanker(banker.BankerTypeRealmSend, cur)
+	banker_.SendCoins(adminAddr, WUGNOT_ADDR, distributedGnotCoin)
+	banker_.SendCoins(adminAddr, aliceAddr, distributedGnotCoin)
+
+	wugnot.Approve(cross(cur), poolAddr, INT64_MAX)
+	gns.Approve(cross(cur), poolAddr, INT64_MAX)
+
+	ufmt.Printf("[INFO] Initial GNS balance of Alice: %d\n", gns.BalanceOf(aliceAddr))
+	ufmt.Printf("[INFO] Initial WUGNOT balance of Alice: %d\n", wugnot.BalanceOf(aliceAddr))
+
+	ufmt.Println("[INFO] Creating pool")
+	pool.CreatePool(
+		cross(cur),
+		token0Path,
+		token1Path,
+		fee,
+		gnsmath.TickMathGetSqrtRatioAtTick(0).ToString(),
+	)
+
+	ufmt.Println("[INFO] Setting up emission rewards")
+}
+
+func mintAlicePosition(cur realm) {
+	testing.SetRealm(aliceRealm)
+	wugnot.Approve(cross(cur), poolAddr, INT64_MAX)
+	gns.Approve(cross(cur), poolAddr, INT64_MAX)
+
+	ufmt.Println("[INFO] Minting position for Alice")
+	testing.SetOriginSend(chain.Coins{})
+	positionId, liquidity, amount0, amount1 := position.Mint(
+		cross(cur),
+		token0Path,
+		token1Path,
+		fee,
+		-6960,
+		6960,
+		"50000000",
+		"50000000",
+		"0",
+		"0",
+		time.Now().Unix()+3600,
+		aliceAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] Position ID should be %d\n", positionId)
+	ufmt.Printf("[EXPECTED] Liquidity should be %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] Amount0 should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Amount1 should be %s\n", amount1)
+}
+
+func checkInitialEmissionState(cur realm) {
+	testing.SetRealm(adminRealm)
+	pos, _ := position.GetPosition(1)
+
+	ufmt.Printf("[EXPECTED] Initial position liquidity should be %s\n", pos.Liquidity())
+	ufmt.Printf("[EXPECTED] Initial emission rewards should be 0\n")
+}
+
+func executeSwaps(cur realm) {
+	testing.SetRealm(adminRealm)
+	wugnot.Approve(cross(cur), poolAddr, INT64_MAX)
+	gns.Approve(cross(cur), poolAddr, INT64_MAX)
+
+	// set current realm and origin caller
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/gnoswap/router"))
+	ufmt.Println("[INFO] Executing swap WUGNOT -> GNS")
+	amount0, amount1 := pool.Swap(
+		cross(cur),
+		token0Path,
+		token1Path,
+		fee,
+		adminAddr,
+		true,
+		"10000000",
+		MIN_PRICE,
+		func(cur realm, amount0Delta, amount1Delta int64, _ *pool.CallbackMarker) error {
+			return mockSwapCallback(cur, token0Path, token1Path, amount0Delta, amount1Delta, true)
+		},
+	)
+
+	ufmt.Printf("[EXPECTED] Swap amount0 should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Swap amount1 should be %s\n", amount1)
+}
+
+func waitForEmissionPeriod(cur realm) {
+	ufmt.Println("[INFO] Waiting for emission period")
+	testing.SkipHeights(100)
+}
+
+func collectFeesAndRewards(cur realm) {
+	testing.SetRealm(aliceRealm)
+	wugnot.Approve(cross(cur), poolAddr, INT64_MAX)
+	gns.Approve(cross(cur), poolAddr, INT64_MAX)
+
+	ufmt.Println("[INFO] Collecting fees and rewards")
+	_, fee0, fee1, emission0, emission1, _ := position.CollectFee(cross(cur), 1)
+
+	ufmt.Printf("[EXPECTED] Collected fee0 should be %s\n", fee0)
+	ufmt.Printf("[EXPECTED] Collected fee1 should be %s\n", fee1)
+	ufmt.Printf("[EXPECTED] Collected emission0 should be %s\n", emission0)
+	ufmt.Printf("[EXPECTED] Collected emission1 should be %s\n", emission1)
+}
+
+func verifyFinalBalances(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	ufmt.Println("[INFO] Checking final balances")
+	aliceWugnotBalance := wugnot.BalanceOf(aliceAddr)
+	aliceGnsBalance := gns.BalanceOf(aliceAddr)
+
+	ufmt.Printf("[EXPECTED] Alice final WUGNOT balance should be %d\n", aliceWugnotBalance)
+	ufmt.Printf("[EXPECTED] Alice final GNS balance should be %d\n", aliceGnsBalance)
+}
+
+func mockSwapCallback(cur realm, token0Path string, token1Path string, amount0Delta int64, amount1Delta int64, zeroForOne bool) error {
+	testing.SetRealm(adminRealm)
+
+	if zeroForOne {
+		common.SafeGRC20Transfer(cross(cur), token0Path, poolAddr, amount0Delta)
+	} else {
+		common.SafeGRC20Transfer(cross(cur), token1Path, poolAddr, amount1Delta)
+	}
+
+	return nil
+}
+
+// Output:
+// [SCENARIO] 1. Initialize pool and emission
+// [INFO] Distributing GNS tokens
+// [INFO] Distributing WUGNOT tokens
+// [INFO] Initial GNS balance of Alice: 50000000
+// [INFO] Initial WUGNOT balance of Alice: 50000000
+// [INFO] Creating pool
+// [INFO] Setting up emission rewards
+//
+// [SCENARIO] 2. Mint position for Alice
+// [INFO] Minting position for Alice
+// [EXPECTED] Position ID should be 1
+// [EXPECTED] Liquidity should be 170132354
+// [EXPECTED] Amount0 should be 50000000
+// [EXPECTED] Amount1 should be 50000000
+//
+// [SCENARIO] 3. Check initial emission state
+// [EXPECTED] Initial position liquidity should be 170132354
+// [EXPECTED] Initial emission rewards should be 0
+//
+// [SCENARIO] 4. Execute swaps to generate fees
+// [INFO] Executing swap WUGNOT -> GNS
+// [EXPECTED] Swap amount0 should be 10000000
+// [EXPECTED] Swap amount1 should be -9418086
+//
+// [SCENARIO] 5. Wait for emission period
+// [INFO] Waiting for emission period
+//
+// [SCENARIO] 6. Collect fees and emission rewards
+// [INFO] Collecting fees and rewards
+// [EXPECTED] Collected fee0 should be 29700
+// [EXPECTED] Collected fee1 should be 0
+// [EXPECTED] Collected emission0 should be gno.land/r/gnoland/wugnot.wugnot:gno.land/r/gnoswap/gns.GNS:3000
+// [EXPECTED] Collected emission1 should be 29999
+//
+// [SCENARIO] 7. Verify final balances
+// [INFO] Checking final balances
+// [EXPECTED] Alice final WUGNOT balance should be 29700
+// [EXPECTED] Alice final GNS balance should be 0

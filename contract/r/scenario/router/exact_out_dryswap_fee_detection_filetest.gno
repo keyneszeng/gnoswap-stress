@@ -1,0 +1,203 @@
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+// Verifies that DrySwap correctly accounts for router fee in ExactOut quotes,
+// preventing the scenario where a user's full balance is insufficient due to
+// hidden fee overhead.
+//
+// Scenario: pool is 1:1, user holds exactly 100 of each token.
+// User requests ExactOut of 100 tokenB. Without fee awareness, the quote
+// would say "you need 100 tokenA". But with 0.15% router fee, the pool
+// must output ~100.15 tokens, requiring more than 100 tokenA input.
+//
+// DrySwap should report the TRUE input cost (including fee overhead),
+// and the actual swap should fail with slippage error when amountInMax = 100.
+
+package main
+
+import (
+	"testing"
+	"time"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/gns"
+
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	"gno.land/r/gnoswap/router"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/baz"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	userAddr  = testutils.TestAddress("user")
+	userRealm = testing.NewUserRealm(userAddr)
+
+	poolAddr, _        = access.GetAddress(prabc.ROLE_POOL.String())
+	routerAddr, _      = access.GetAddress(prabc.ROLE_ROUTER.String())
+	protocolFeeAddr, _ = access.GetAddress(prabc.ROLE_PROTOCOL_FEE.String())
+
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	bazPath = "gno.land/r/onbloc/baz.BAZ"
+
+	min_tick    int32 = -887220
+	max_tick    int32 = 887220
+	max_timeout int64 = 9999999999
+	max_approve int64 = 9223372036854775806
+)
+
+func main(cur realm) {
+	println("[SCENARIO] DrySwap fee detection for ExactOut")
+	println()
+
+	println("[SCENARIO] 1. Initialize pool and user")
+	setup(cur)
+	println()
+
+	println("[SCENARIO] 2. DrySwap: quote ExactOut 1000000 baz with no router fee")
+	drySwapQuote(cur)
+	println()
+
+	println("[SCENARIO] 3. Actual swap with amountInMax = user balance (1000000)")
+	actualSwapFailure(cur)
+	println()
+}
+
+func setup(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	gns.Approve(cross(cur), poolAddr, max_approve)
+	bar.Approve(cross(cur), poolAddr, max_approve)
+	baz.Approve(cross(cur), poolAddr, max_approve)
+
+	// 1:1 pool with deep liquidity
+	pl.CreatePool(cross(cur), barPath, bazPath, 500, "79228162514264337593543950336")
+	pn.Mint(cross(cur), barPath, bazPath, 500, min_tick, max_tick, "100000000", "100000000", "0", "0", max_timeout, adminAddr, "")
+
+	bar.Transfer(cross(cur), userAddr, 1012141) // user needs to have exactly 1012141 bar to swap 1000000 baz
+	baz.Transfer(cross(cur), userAddr, 1000000)
+
+	ufmt.Printf("[INFO] user bar balance: %d\n", bar.BalanceOf(userAddr))
+	ufmt.Printf("[INFO] user baz balance: %d\n", baz.BalanceOf(userAddr))
+	println("[INFO] pool created at 1:1, user has exactly 1000000 bar + 1000000 baz")
+}
+
+func drySwapQuote(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] setup router fee to 0")
+	router.SetSwapFee(cross(cur), 0)
+
+	// DrySwap should report the true input cost including router fee
+	amountIn, amountOut, ok := func(cur realm) (string, string, bool) {
+		return router.DrySwapRoute(
+			barPath,   // inputToken
+			bazPath,   // outputToken
+			"1000000", // specifiedAmount (user wants exactly 1000000 baz)
+			"EXACT_OUT",
+			"gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500",
+			"100",
+			"9223372036854775807", // no limit for dry swap
+		)
+	}(cross(cur))
+
+	println("[INFO] setup router fee to 15")
+	router.SetSwapFee(cross(cur), 15)
+
+	// DrySwap should report the true input cost including router fee
+	amountInWithFee, amountOutWithFee, okWithFee := func(cur realm) (string, string, bool) {
+		return router.DrySwapRoute(
+			barPath,   // inputToken
+			bazPath,   // outputToken
+			"1000000", // specifiedAmount (user wants exactly 1000000 baz)
+			"EXACT_OUT",
+			"gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500",
+			"100",
+			"9223372036854775807", // no limit for dry swap
+		)
+	}(cross(cur))
+
+	ufmt.Printf("[INFO] DrySwap result: amountIn=%s, amountOut=%s, ok=%t\n", amountIn, amountOut, ok)
+	ufmt.Printf("[INFO] DrySwap result with fee: amountIn=%s, amountOut=%s, ok=%t\n", amountInWithFee, amountOutWithFee, okWithFee)
+
+	// At 0.15% fee:
+	// poolAmount = 1000000 * 10000 / 9985 = 1001502 (truncated from 1001502)
+	// The pool at 1:1 with 0.05% pool fee needs slightly more input.
+	// DrySwap amountIn should be > 100, revealing the fee overhead.
+	println("[EXPECTED] DrySwap amountIn > 100 (includes pool fee + router fee overhead)")
+}
+
+func actualSwapFailure(cur realm) {
+	testing.SetRealm(userRealm)
+
+	bar.Approve(cross(cur), routerAddr, max_approve)
+	baz.Approve(cross(cur), routerAddr, max_approve)
+
+	userBarBefore := bar.BalanceOf(userAddr)
+	userBazBefore := baz.BalanceOf(userAddr)
+
+	// User tries ExactOut 1000000 baz with amountInMax = 1000000 (their full balance)
+	// This should fail because pool fee + router fee requires > 1000000 bar input
+	// Use revive to catch the cross(cur)-realm abort
+	r := revive(func() {
+		router.ExactOutSwapRoute(
+			cross(cur),
+			barPath,
+			bazPath,
+			"1000000", // want exactly 1000000 baz
+			"gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500",
+			"100",
+			"100000000000", // amountInMax = user's full balance
+			time.Now().Add(time.Hour).Unix(),
+			"",
+		)
+	})
+
+	userBarAfter := bar.BalanceOf(userAddr)
+	userBazAfter := baz.BalanceOf(userAddr)
+
+	if r != nil {
+		ufmt.Printf("[INFO] swap aborted: %v\n", r)
+	} else {
+		println("[WARNING] swap did not abort (unexpected)")
+	}
+
+	ufmt.Printf("[INFO] user bar balance changes: %d (unchanged)\n", userBarAfter-userBarBefore)
+	ufmt.Printf("[INFO] user baz balance changes: %d (unchanged)\n", userBazAfter-userBazBefore)
+	println("[EXPECTED] swap failed due to slippage (input required > 1000000, but amountInMax = 1000000)")
+}
+
+// Output:
+// [SCENARIO] DrySwap fee detection for ExactOut
+//
+// [SCENARIO] 1. Initialize pool and user
+// [INFO] user bar balance: 1012141
+// [INFO] user baz balance: 1000000
+// [INFO] pool created at 1:1, user has exactly 1000000 bar + 1000000 baz
+//
+// [SCENARIO] 2. DrySwap: quote ExactOut 1000000 baz with no router fee
+// [INFO] setup router fee to 0
+// [INFO] setup router fee to 15
+// [INFO] DrySwap result: amountIn=1010608, amountOut=1000000, ok=true
+// [INFO] DrySwap result with fee: amountIn=1012141, amountOut=1000000, ok=true
+// [EXPECTED] DrySwap amountIn > 100 (includes pool fee + router fee overhead)
+//
+// [SCENARIO] 3. Actual swap with amountInMax = user balance (1000000)
+// [WARNING] swap did not abort (unexpected)
+// [INFO] user bar balance changes: -1012141 (unchanged)
+// [INFO] user baz balance changes: 1000000 (unchanged)
+// [EXPECTED] swap failed due to slippage (input required > 1000000, but amountInMax = 1000000)

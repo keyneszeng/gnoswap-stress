@@ -1,0 +1,127 @@
+// PKGPATH: gno.land/r/demo/main
+
+package main
+
+import (
+	"testing"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	uassert "gno.land/p/nt/uassert/v0"
+
+	"gno.land/r/gnoswap/access"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/baz"
+
+	"gno.land/r/gnoswap/pool"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+)
+
+var t *testing.T
+
+// Constants for fee tiers
+const (
+	FeeTier100 uint32 = 100
+)
+
+// Constants for addresses and approvals
+const (
+	maxApprove int64 = 9223372036854775806
+)
+
+// Variables for test addresses and realms
+var (
+	adminAddr, _    = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm      = testing.NewUserRealm(adminAddr)
+	positionAddr, _ = access.GetAddress(prbac.ROLE_POSITION.String())
+	posRealm        = testing.NewUserRealm(positionAddr)
+	poolAddr, _     = access.GetAddress(prbac.ROLE_POOL.String())
+)
+
+func main(cur realm) {
+	testInvalidTickRangeBurn(cur)
+}
+
+// testInvalidTickRangeBurn tests burning with invalid tick range (should abort)
+func testInvalidTickRangeBurn(cur realm) {
+	// Given: Pool exists with minted position
+	barTokenPath := "gno.land/r/onbloc/bar.BAR"
+	bazTokenPath := "gno.land/r/onbloc/baz.BAZ"
+	fee := FeeTier100
+	liquidityAmount := "1000000"
+	tickLower := int32(-100)
+	tickUpper := int32(100)
+
+	println("[INFO] Creating pool with fee tier:", fee)
+	println("[INFO] Initial liquidity amount:", liquidityAmount)
+	println("[INFO] Valid tick range:", tickLower, "to", tickUpper)
+
+	// Create pool
+	testing.SetRealm(adminRealm)
+	pool.SetPoolCreationFee(cross(cur), 0)
+	pool.CreatePool(
+		cross(cur),
+		barTokenPath,
+		bazTokenPath,
+		fee,
+		"79228162514264337593543950336",
+	)
+
+	// Approve tokens for minting
+	bar.Approve(cross(cur), poolAddr, maxApprove)
+	baz.Approve(cross(cur), poolAddr, maxApprove)
+
+	// Mint position
+	testing.SetRealm(posRealm)
+	pool.Mint(
+		cross(cur),
+		barTokenPath,
+		bazTokenPath,
+		fee,
+		tickLower,
+		tickUpper,
+		liquidityAmount,
+		adminAddr,
+	)
+
+	println("[INFO] Position minted successfully")
+
+	// When: Burn with invalid tick range (tickLower > tickUpper)
+	invalidTickLower := int32(200)
+	invalidTickUpper := int32(100)
+	burnAmount := "1000000"
+
+	println("[INFO] Attempting to burn with invalid tick range:", invalidTickLower, "to", invalidTickUpper)
+	println("[INFO] Burn amount:", burnAmount)
+
+	// Then: Should abort with specific error message
+	expectedAbortMsg := "[GNOSWAP-POOL-018] tickLower is greater than or equal to tickUpper || tickLower(200), tickUpper(100)"
+	println("[EXPECTED] Should abort with message:", expectedAbortMsg)
+
+	testing.SetRealm(posRealm)
+	uassert.AbortsWithMessage(t, cur, expectedAbortMsg, func() {
+		pool.Burn(
+			cross(cur),
+			barTokenPath,
+			bazTokenPath,
+			fee,
+			invalidTickLower,
+			invalidTickUpper,
+			burnAmount,
+			adminAddr,
+		)
+	})
+
+	println("[SCENARIO] 3. Invalid Tick Range Burn - PASSED")
+}
+
+// Output:
+// [INFO] Creating pool with fee tier: 100
+// [INFO] Initial liquidity amount: 1000000
+// [INFO] Valid tick range: -100 to 100
+// [INFO] Position minted successfully
+// [INFO] Attempting to burn with invalid tick range: 200 to 100
+// [INFO] Burn amount: 1000000
+// [EXPECTED] Should abort with message: [GNOSWAP-POOL-018] tickLower is greater than or equal to tickUpper || tickLower(200), tickUpper(100)
+// [SCENARIO] 3. Invalid Tick Range Burn - PASSED

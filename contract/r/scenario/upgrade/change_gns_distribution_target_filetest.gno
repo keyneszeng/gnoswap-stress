@@ -1,0 +1,160 @@
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+// change gns distribution target for upgrade
+package main
+
+import (
+	"chain/runtime"
+	"testing"
+	"time"
+
+	"gno.land/r/gnoswap/scenarioutils"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	"gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/protocol_fee"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/emission"
+	"gno.land/r/gnoswap/gns"
+)
+
+var t *testing.T
+
+var (
+	adminAddr, _ = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	// current distribution targets
+	stakerAddr        = access.MustGetAddress(prbac.ROLE_STAKER.String())
+	govStakerAddr     = access.MustGetAddress(prbac.ROLE_GOV_STAKER.String())
+	devOpsAddr        = access.MustGetAddress(prbac.ROLE_DEVOPS.String())
+	communityPoolAddr = access.MustGetAddress(prbac.ROLE_COMMUNITY_POOL.String())
+
+	// new distribution targets for upgrade
+	newGovStakerAddr     = testutils.TestAddress("newGovStakerAddr")
+	newDevOpsAddr        = testutils.TestAddress("newDevOpsAddr")
+	newCommunityPoolAddr = testutils.TestAddress("newCommunityPoolAddr")
+	newStakerAddr        = testutils.TestAddress("newStakerAddr")
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Initialize emission")
+	initEmission(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 2. Mint to distribution target (before upgrade)")
+	testing.SkipHeights(1)
+	ufmt.Println("[INFO] current block height", runtime.ChainHeight())
+	mintAndDistribute(cur)
+	println()
+
+	println("[SCENARIO] 3. Change distribution target for upgrade")
+	changeDistributionTarget(cur)
+	println()
+
+	println("[SCENARIO] 4. Mint to distribution target (after upgrade)")
+	testing.SkipHeights(1)
+	println("[INFO] current block height", runtime.ChainHeight())
+	mintAndDistribute(cur)
+	println()
+}
+
+func initEmission(cur realm) {
+	testing.SetRealm(adminRealm)
+	scenarioutils.EnsureCanonicalDefaultPool(cross(cur))
+	emission.SetDistributionStartTime(cross(cur), time.Now().Unix()+1)
+	emission.MintAndDistributeGns(cross(cur))
+}
+
+func mintAndDistribute(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/gnoswap/emission"))
+
+	previousStakerBalance := gns.BalanceOf(stakerAddr)
+	previousGovStakerBalance := gns.BalanceOf(govStakerAddr)
+	previousDevOpsBalance := gns.BalanceOf(devOpsAddr)
+	previousCommunityPoolBalance := gns.BalanceOf(communityPoolAddr)
+
+	previousNewStakerBalance := gns.BalanceOf(newStakerAddr)
+	previousNewGovStakerBalance := gns.BalanceOf(newGovStakerAddr)
+	previousNewDevOpsBalance := gns.BalanceOf(newDevOpsAddr)
+	previousNewCommunityPoolBalance := gns.BalanceOf(newCommunityPoolAddr)
+
+	emission.MintAndDistributeGns(cross(cur))
+
+	stakerBalanceChange := gns.BalanceOf(stakerAddr) - previousStakerBalance
+	govStakerBalanceChange := gns.BalanceOf(govStakerAddr) - previousGovStakerBalance
+	devOpsBalanceChange := gns.BalanceOf(devOpsAddr) - previousDevOpsBalance
+	communityPoolBalanceChange := gns.BalanceOf(communityPoolAddr) - previousCommunityPoolBalance
+
+	newStakerBalanceChange := gns.BalanceOf(newStakerAddr) - previousNewStakerBalance
+	newGovStakerBalanceChange := gns.BalanceOf(newGovStakerAddr) - previousNewGovStakerBalance
+	newDevOpsBalanceChange := gns.BalanceOf(newDevOpsAddr) - previousNewDevOpsBalance
+	newCommunityPoolBalanceChange := gns.BalanceOf(newCommunityPoolAddr) - previousNewCommunityPoolBalance
+
+	totalMintedAmount := gns.MintedEmissionAmount()
+
+	ufmt.Printf("[EXPECTED] total minted amount should be %d\n", totalMintedAmount)
+	ufmt.Printf("[EXPECTED] (v1) staker balance change should be %d\n", stakerBalanceChange)
+	ufmt.Printf("[EXPECTED] (v1) gov staker balance change should be %d\n", govStakerBalanceChange)
+	ufmt.Printf("[EXPECTED] (v1) dev ops balance change should be %d\n", devOpsBalanceChange)
+	ufmt.Printf("[EXPECTED] (v1) community pool balance change should be %d\n", communityPoolBalanceChange)
+	ufmt.Printf("[EXPECTED] (new) staker balance change should be %d\n", newStakerBalanceChange)
+	ufmt.Printf("[EXPECTED] (new) gov staker balance change should be %d\n", newGovStakerBalanceChange)
+	ufmt.Printf("[EXPECTED] (new) dev ops balance change should be %d\n", newDevOpsBalanceChange)
+	ufmt.Printf("[EXPECTED] (new) community pool balance change should be %d\n", newCommunityPoolBalanceChange)
+}
+
+func changeDistributionTarget(cur realm) {
+	testing.SetOriginCaller(adminAddr)
+
+	rbac.UpdateRoleAddress(cross(cur), prbac.ROLE_STAKER.String(), newStakerAddr)
+	rbac.UpdateRoleAddress(cross(cur), prbac.ROLE_GOV_STAKER.String(), newGovStakerAddr)
+	rbac.UpdateRoleAddress(cross(cur), prbac.ROLE_DEVOPS.String(), newDevOpsAddr)
+	rbac.UpdateRoleAddress(cross(cur), prbac.ROLE_COMMUNITY_POOL.String(), newCommunityPoolAddr)
+
+	ufmt.Printf("[EXPECTED] staker address should be changed %s to %s\n", stakerAddr, newStakerAddr)
+	ufmt.Printf("[EXPECTED] gov staker address should be changed %s to %s\n", govStakerAddr, newGovStakerAddr)
+	ufmt.Printf("[EXPECTED] dev ops address should be changed %s to %s\n", devOpsAddr, newDevOpsAddr)
+	ufmt.Printf("[EXPECTED] community pool address should be changed %s to %s\n", communityPoolAddr, newCommunityPoolAddr)
+}
+
+// Output:
+// [SCENARIO] 1. Initialize emission
+//
+// [SCENARIO] 2. Mint to distribution target (before upgrade)
+// [INFO] current block height 124
+// [EXPECTED] total minted amount should be 35673515
+// [EXPECTED] (v1) staker balance change should be 26755136
+// [EXPECTED] (v1) gov staker balance change should be 0
+// [EXPECTED] (v1) dev ops balance change should be 7134703
+// [EXPECTED] (v1) community pool balance change should be 1783675
+// [EXPECTED] (new) staker balance change should be 0
+// [EXPECTED] (new) gov staker balance change should be 0
+// [EXPECTED] (new) dev ops balance change should be 0
+// [EXPECTED] (new) community pool balance change should be 0
+//
+// [SCENARIO] 3. Change distribution target for upgrade
+// [EXPECTED] staker address should be changed g1q6d4ns7zkr492rgl0pcgf5ajaf2dlz0nnptky3 to g1dejhw5m5v94k2ujpv3j8yh6lta047h6ly4ras8
+// [EXPECTED] gov staker address should be changed g1em9s40nfrwd2aqn9ypjv7d9x9z9c8uk5uxrza9 to g1dejhw3m0wefhgcttv4eyzerywf047h6ldvhvcq
+// [EXPECTED] dev ops address should be changed g1mjvd83nnjee3z2g7683er55me9f09688pd4mj9 to g1dejhw3r9we8hqu6pv3j8yh6lta047h6lguneqv
+// [EXPECTED] community pool address should be changed g13lpjmjhl2du7whed3wxe4n5508txxja6ezxeg7 to g1dejhwsm0d4kh2mnfw3u4qmm0d3qkgerj7zt4z6
+//
+// [SCENARIO] 4. Mint to distribution target (after upgrade)
+// [INFO] current block height 125
+// [EXPECTED] total minted amount should be 71347030
+// [EXPECTED] (v1) staker balance change should be 0
+// [EXPECTED] (v1) gov staker balance change should be 0
+// [EXPECTED] (v1) dev ops balance change should be 0
+// [EXPECTED] (v1) community pool balance change should be 0
+// [EXPECTED] (new) staker balance change should be 26755137
+// [EXPECTED] (new) gov staker balance change should be 0
+// [EXPECTED] (new) dev ops balance change should be 7134703
+// [EXPECTED] (new) community pool balance change should be 1783675

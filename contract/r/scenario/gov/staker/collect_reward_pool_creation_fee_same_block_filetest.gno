@@ -1,0 +1,129 @@
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+// staker protocol fee reward
+
+package main
+
+import (
+	"gno.land/p/gnoswap/gnsmath"
+	"testing"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/gov/staker/v1"
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+	_ "gno.land/r/gnoswap/rbac"
+
+	"gno.land/r/gnoswap/common"
+	"gno.land/r/gnoswap/pool"
+
+	"gno.land/r/gnoswap/access"
+
+	"gno.land/r/gnoswap/gov/staker"
+
+	"gno.land/r/gnoswap/gns"
+)
+
+var (
+	adminAddr  = access.MustGetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm = testing.NewUserRealm(adminAddr)
+
+	poolAddr      = access.MustGetAddress(prbac.ROLE_POOL.String())
+	stakerAddr    = access.MustGetAddress(prbac.ROLE_STAKER.String())
+	gnoStakerAddr = access.MustGetAddress(prbac.ROLE_GOV_STAKER.String())
+
+	aliceAddr = testutils.TestAddress("alice")
+
+	gnsPath = "gno.land/r/gnoswap/gns.GNS"
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	quxPath = "gno.land/r/onbloc/qux.QUX"
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Delegate GNS from alice to admin")
+	delegateWithMint(cur, aliceAddr, adminAddr, 1_000_000)
+	testing.SkipHeights(1)
+	println()
+
+	println("[SCENARIO] 2. Add protocol fee by pool creation")
+	createPoolByAdmin(cur, barPath, quxPath, 3000)
+	testing.SkipHeights(1)
+	println()
+
+	println("[SCENARIO] 3. Check and collect protocol fee reward for alice (include create pool fee)")
+	createPoolByAdmin(cur, barPath, quxPath, 500)
+	checkBalanceFn(cur, gnsPath, aliceAddr, func() {
+		collectProtocolFee(cur, aliceAddr)
+	})
+	println()
+
+	println("[SCENARIO] 4. Second claim in the same block is an idempotent no-op")
+	createPoolByAdmin(cur, barPath, quxPath, 100)
+	checkBalanceFn(cur, gnsPath, aliceAddr, func() {
+		collectProtocolFee(cur, aliceAddr)
+	})
+	println("[EXPECTED] second claim in the same block returns zero additional reward")
+}
+
+func delegateWithMint(cur realm, from, to address, amount int64) {
+	// if from is not admin, transfer GNS from admin to from
+	if from != adminAddr {
+		testing.SetRealm(adminRealm)
+		gns.Transfer(cross(cur), from, amount)
+	}
+
+	testing.SetRealm(testing.NewUserRealm(from))
+	gns.Approve(cross(cur), gnoStakerAddr, amount)
+	staker.Delegate(cross(cur), to, int64(amount), "")
+
+	ufmt.Printf("[INFO] delegated %d GNS from %s to %s\n", amount, from, to)
+}
+
+func createPoolByAdmin(cur realm, token0, token1 string, fee int64) {
+	testing.SetRealm(adminRealm)
+	poolCreationFee := pool.GetPoolCreationFee()
+	gns.Approve(cross(cur), poolAddr, poolCreationFee)
+
+	pool.CreatePool(cross(cur), token0, token1, uint32(fee), gnsmath.TickMathGetSqrtRatioAtTick(0).ToString())
+
+	ufmt.Printf("[INFO] created %s:%s:%d pool (poolCreationFee: %d)\n", token0, token1, fee, poolCreationFee)
+}
+
+func collectProtocolFee(cur realm, addr address) {
+	testing.SetRealm(testing.NewUserRealm(addr))
+	staker.CollectReward(cross(cur))
+
+	println("[INFO] collected protocol fee reward for ", addr)
+}
+
+func checkBalanceFn(cur realm, tokenPath string, addr address, fn func()) {
+	testing.SetRealm(testing.NewUserRealm(addr))
+
+	balanceBefore := common.BalanceOf(tokenPath, addr)
+	fn()
+	balanceAfter := common.BalanceOf(tokenPath, addr)
+
+	ufmt.Printf("[EXPECTED] %s's balance of %s: %d\n", addr, tokenPath, balanceAfter-balanceBefore)
+}
+
+// Output:
+// [SCENARIO] 1. Delegate GNS from alice to admin
+// [INFO] delegated 1000000 GNS from g1v9kxjcm9ta047h6lta047h6lta047h6lzd40gh to g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5
+//
+// [SCENARIO] 2. Add protocol fee by pool creation
+// [INFO] created gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/qux.QUX:3000 pool (poolCreationFee: 100000000)
+//
+// [SCENARIO] 3. Check and collect protocol fee reward for alice (include create pool fee)
+// [INFO] created gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/qux.QUX:500 pool (poolCreationFee: 100000000)
+// [INFO] collected protocol fee reward for  g1v9kxjcm9ta047h6lta047h6lta047h6lzd40gh
+// [EXPECTED] g1v9kxjcm9ta047h6lta047h6lta047h6lzd40gh's balance of gno.land/r/gnoswap/gns.GNS: 200000000
+//
+// [SCENARIO] 4. Second claim in the same block is an idempotent no-op
+// [INFO] created gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/qux.QUX:100 pool (poolCreationFee: 100000000)
+// [INFO] collected protocol fee reward for  g1v9kxjcm9ta047h6lta047h6lta047h6lzd40gh
+// [EXPECTED] g1v9kxjcm9ta047h6lta047h6lta047h6lzd40gh's balance of gno.land/r/gnoswap/gns.GNS: 0
+// [EXPECTED] second claim in the same block returns zero additional reward

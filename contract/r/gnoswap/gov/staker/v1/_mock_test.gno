@@ -1,0 +1,277 @@
+package staker
+
+import (
+	"errors"
+
+	"gno.land/p/gnoswap/utils"
+	bptree "gno.land/p/nt/bptree/v0"
+
+	"gno.land/r/gnoswap/gov/staker"
+)
+
+// mockGovStakerStore is a mock implementation of IGovStakerStore for testing
+type mockGovStakerStore struct {
+	// Basic configuration
+	unDelegationLockupPeriod       int64
+	hasUnDelegationLockupPeriodKey bool
+	totalDelegatedAmount           int64
+	totalLockedAmount              int64
+
+	// Delegation data
+	delegations      *bptree.BPTree // map[int64]*staker.Delegation
+	delegationNextID *staker.Counter
+	userDelegations  *bptree.BPTree
+
+	// New delegation history structures
+	totalDelegationHistory       *staker.UintTree // timestamp -> int64
+	userDelegationHistory        *bptree.BPTree   // address -> *staker.UintTree[timestamp -> int64]
+	hasTotalDelegationHistoryKey bool             // for testing HasTotalDelegationHistoryStoreKey
+
+	// Manager states
+	emissionRewardManager    *staker.EmissionRewardManager
+	protocolFeeRewardManager *staker.ProtocolFeeRewardManager
+	delegationManager        *staker.DelegationManager
+	launchpadProjectDeposits *staker.LaunchpadProjectDeposits
+}
+
+var _ staker.IGovStakerStore = (*mockGovStakerStore)(nil)
+
+func newMockGovStakerStore() staker.IGovStakerStore {
+	return &mockGovStakerStore{
+		delegations:                  bptree.NewBPTreeN(16),
+		userDelegations:              bptree.NewBPTreeN(16),
+		delegationNextID:             staker.NewCounter(),
+		totalDelegationHistory:       staker.NewUintTree(),
+		userDelegationHistory:        bptree.NewBPTreeN(16),
+		hasTotalDelegationHistoryKey: true,
+	}
+}
+
+// Basic configuration methods
+func (m *mockGovStakerStore) HasUnDelegationLockupPeriodStoreKey() bool {
+	return m.hasUnDelegationLockupPeriodKey
+}
+
+func (m *mockGovStakerStore) GetUnDelegationLockupPeriod() int64 {
+	if !m.hasUnDelegationLockupPeriodKey {
+		panic(errNotInitialized)
+	}
+	return m.unDelegationLockupPeriod
+}
+
+func (m *mockGovStakerStore) SetUnDelegationLockupPeriod(_ int, rlm realm, period int64) error {
+	m.unDelegationLockupPeriod = period
+	m.hasUnDelegationLockupPeriodKey = true
+	return nil
+}
+
+func (m *mockGovStakerStore) HasTotalDelegatedAmountStoreKey() bool {
+	return true // Always available in mock
+}
+
+func (m *mockGovStakerStore) GetTotalDelegatedAmount() int64 {
+	return m.totalDelegatedAmount
+}
+
+func (m *mockGovStakerStore) SetTotalDelegatedAmount(_ int, rlm realm, amount int64) error {
+	m.totalDelegatedAmount = amount
+	return nil
+}
+
+func (m *mockGovStakerStore) HasTotalLockedAmountStoreKey() bool {
+	return true // Always available in mock
+}
+
+func (m *mockGovStakerStore) GetTotalLockedAmount() int64 {
+	return m.totalLockedAmount
+}
+
+func (m *mockGovStakerStore) SetTotalLockedAmount(_ int, rlm realm, amount int64) error {
+	m.totalLockedAmount = amount
+	return nil
+}
+
+// Delegation management methods
+func (m *mockGovStakerStore) HasDelegationsStoreKey() bool {
+	return true // Always available in mock
+}
+
+func (m *mockGovStakerStore) SetDelegations(_ int, rlm realm, delegations *bptree.BPTree) error {
+	m.delegations = delegations
+	return nil
+}
+
+func (m *mockGovStakerStore) HasDelegation(id int64) bool {
+	exists := m.delegations.Get(utils.Uint64ToString(uint64(id))) != nil
+	return exists
+}
+
+func (m *mockGovStakerStore) GetDelegation(id int64) (*staker.Delegation, bool) {
+	value := m.delegations.Get(utils.Uint64ToString(uint64(id)))
+	if value == nil {
+		return nil, false
+	}
+	return value.(*staker.Delegation), true
+}
+
+func (m *mockGovStakerStore) SetDelegation(_ int, rlm realm, id int64, delegation *staker.Delegation) error {
+	m.delegations.Remove(utils.Uint64ToString(uint64(id)))
+	m.delegations.Set(utils.Uint64ToString(uint64(id)), delegation)
+	return nil
+}
+
+func (m *mockGovStakerStore) RemoveDelegation(_ int, rlm realm, id int64) error {
+	_, _ = m.delegations.Remove(utils.Uint64ToString(uint64(id)))
+	return nil
+}
+
+func (m *mockGovStakerStore) GetAllDelegations() *bptree.BPTree {
+	return m.delegations
+}
+
+func (m *mockGovStakerStore) HasDelegationCounterStoreKey() bool {
+	return true // Always available in mock
+}
+
+func (m *mockGovStakerStore) GetDelegationCounter() *staker.Counter {
+	return m.delegationNextID
+}
+
+func (m *mockGovStakerStore) SetDelegationCounter(_ int, rlm realm, counter *staker.Counter) error {
+	m.delegationNextID = counter
+	return nil
+}
+
+// Total delegation history methods (timestamp -> int64)
+func (m *mockGovStakerStore) HasTotalDelegationHistoryStoreKey() bool {
+	return m.hasTotalDelegationHistoryKey
+}
+
+func (m *mockGovStakerStore) GetTotalDelegationHistory() *staker.UintTree {
+	return m.totalDelegationHistory
+}
+
+func (m *mockGovStakerStore) SetTotalDelegationHistory(_ int, rlm realm, history *staker.UintTree) error {
+	m.totalDelegationHistory = history
+	return nil
+}
+
+// User delegation history methods (address -> *UintTree[timestamp -> int64])
+func (m *mockGovStakerStore) HasUserDelegationHistoryStoreKey() bool {
+	return true // Always available in mock
+}
+
+func (m *mockGovStakerStore) GetUserDelegationHistory() *bptree.BPTree {
+	return m.userDelegationHistory
+}
+
+func (m *mockGovStakerStore) SetUserDelegationHistory(_ int, rlm realm, history *bptree.BPTree) error {
+	m.userDelegationHistory = history
+	return nil
+}
+
+// User delegation mapping methods (legacy, kept for compatibility)
+func (m *mockGovStakerStore) HasUserDelegationsStoreKey() bool {
+	return true // Always available in mock
+}
+
+func (m *mockGovStakerStore) HasUserDelegations(user string) bool {
+	exists := m.userDelegations.Get(user) != nil
+	return exists
+}
+
+func (m *mockGovStakerStore) SetUserDelegations(delegations *bptree.BPTree) error {
+	m.userDelegations = delegations
+	return nil
+}
+
+func (m *mockGovStakerStore) GetUserDelegations(user string) ([]int64, error) {
+	value := m.userDelegations.Get(user)
+	if value == nil {
+		return nil, errors.New("user delegations not found")
+	}
+
+	delegationIDs, ok := value.([]int64)
+	if !ok {
+		return nil, errors.New("user delegations not found")
+	}
+
+	return delegationIDs, nil
+}
+
+func (m *mockGovStakerStore) HasEmissionRewardManagerStoreKey() bool {
+	return true // Always available in mock
+}
+
+func (m *mockGovStakerStore) GetEmissionRewardManager() *staker.EmissionRewardManager {
+	if m.emissionRewardManager == nil {
+		m.emissionRewardManager = staker.NewEmissionRewardManager()
+	}
+	return m.emissionRewardManager
+}
+
+func (m *mockGovStakerStore) SetEmissionRewardManager(_ int, rlm realm, manager *staker.EmissionRewardManager) error {
+	m.emissionRewardManager = manager
+	return nil
+}
+
+func (m *mockGovStakerStore) HasProtocolFeeRewardManagerStoreKey() bool {
+	return true // Always available in mock
+}
+
+func (m *mockGovStakerStore) GetProtocolFeeRewardManager() *staker.ProtocolFeeRewardManager {
+	if m.protocolFeeRewardManager == nil {
+		m.protocolFeeRewardManager = staker.NewProtocolFeeRewardManager()
+	}
+	return m.protocolFeeRewardManager
+}
+
+func (m *mockGovStakerStore) SetProtocolFeeRewardManager(_ int, rlm realm, manager *staker.ProtocolFeeRewardManager) error {
+	m.protocolFeeRewardManager = manager
+	return nil
+}
+
+func (m *mockGovStakerStore) HasDelegationManagerStoreKey() bool {
+	return true // Always available in mock
+}
+
+func (m *mockGovStakerStore) GetDelegationManager() *staker.DelegationManager {
+	if m.delegationManager == nil {
+		m.delegationManager = staker.NewDelegationManager()
+	}
+	return m.delegationManager
+}
+
+func (m *mockGovStakerStore) SetDelegationManager(_ int, rlm realm, manager *staker.DelegationManager) error {
+	m.delegationManager = manager
+	return nil
+}
+
+func (m *mockGovStakerStore) HasLaunchpadProjectDepositsStoreKey() bool {
+	return true // Always available in mock
+}
+
+func (m *mockGovStakerStore) GetLaunchpadProjectDeposits() *staker.LaunchpadProjectDeposits {
+	if m.launchpadProjectDeposits == nil {
+		m.launchpadProjectDeposits = staker.NewLaunchpadProjectDeposits()
+	}
+	return m.launchpadProjectDeposits
+}
+
+func (m *mockGovStakerStore) SetLaunchpadProjectDeposits(_ int, rlm realm, deposits *staker.LaunchpadProjectDeposits) error {
+	m.launchpadProjectDeposits = deposits
+	return nil
+}
+
+var errNotInitialized = errors.New("not initialized")
+
+// createTestGovStaker creates a govStakerV1 instance for testing
+func createTestGovStaker() *govStakerV1 {
+	store := newMockGovStakerStore()
+	// Initialize required values
+	mockStore := store.(*mockGovStakerStore)
+	mockStore.unDelegationLockupPeriod = 86400 // 1 day default
+	mockStore.hasUnDelegationLockupPeriodKey = true
+	gs := NewGovStakerV1(store).(*govStakerV1)
+	return gs
+}

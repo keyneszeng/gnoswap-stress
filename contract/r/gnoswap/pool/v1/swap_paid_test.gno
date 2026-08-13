@@ -1,0 +1,473 @@
+package pool
+
+import (
+	"chain"
+	"testing"
+
+	"gno.land/p/gnoswap/gnsmath"
+	"gno.land/p/gnoswap/uint256"
+	uassert "gno.land/p/nt/uassert/v0"
+	"gno.land/r/gnoswap/common"
+	pl "gno.land/r/gnoswap/pool"
+)
+
+func TestSwapCallback_Pay(cur realm, t *testing.T) {
+	tests := []struct {
+		name                            string
+		poolInfo                        swapPaidCreatePoolParams
+		positionInfo                    []swapPaidMintPositionParams
+		swapInfo                        swapPaidSwapParams
+		expectedToken0PoolBalanceChange int64
+		expectedToken1PoolBalanceChange int64
+		expectedHasPanic                bool
+		expectedHasPanicMessage         string
+	}{
+		{
+			name: "zero for one swap is success for paid amount equal to specified amount",
+			poolInfo: swapPaidCreatePoolParams{
+				token0Path: barPath,
+				token1Path: bazPath,
+				feeTier:    FeeTier500,
+			},
+			positionInfo: []swapPaidMintPositionParams{
+				{
+					token0Path:       barPath,
+					token1Path:       bazPath,
+					feeTier:          FeeTier500,
+					tickLower:        -200,
+					tickUpper:        200,
+					amount0Requested: 10000000,
+					amount1Requested: 10000000,
+				},
+			},
+			swapInfo: swapPaidSwapParams{
+				token0Path:               barPath,
+				token1Path:               bazPath,
+				specifiedAmount:          "1000",
+				recipient:                adminAddr,
+				zeroForOne:               true,
+				sqrtPriceLimitX96:        MIN_PRICE,
+				callbackSendToken0Amount: 1000, // equal to specified amount
+				callbackSendToken1Amount: 0,
+			},
+			expectedToken0PoolBalanceChange: 1000,
+			expectedToken1PoolBalanceChange: -998,
+		},
+		{
+			name: "zero for one swap is success for paid amount equal to specified amount with multiple positions",
+			poolInfo: swapPaidCreatePoolParams{
+				token0Path: barPath,
+				token1Path: bazPath,
+				feeTier:    FeeTier500,
+			},
+			positionInfo: []swapPaidMintPositionParams{
+				{
+					token0Path:       barPath,
+					token1Path:       bazPath,
+					feeTier:          FeeTier500,
+					tickLower:        -200,
+					tickUpper:        200,
+					amount0Requested: 10000000,
+					amount1Requested: 10000000,
+				},
+				{
+					token0Path:       barPath,
+					token1Path:       bazPath,
+					feeTier:          FeeTier500,
+					tickLower:        -6000,
+					tickUpper:        6000,
+					amount0Requested: 10000000,
+					amount1Requested: 10000000,
+				},
+			},
+			swapInfo: swapPaidSwapParams{
+				token0Path:               barPath,
+				token1Path:               bazPath,
+				specifiedAmount:          "15000000",
+				recipient:                adminAddr,
+				zeroForOne:               true,
+				sqrtPriceLimitX96:        MIN_PRICE,
+				callbackSendToken0Amount: 15000000, // equal to specified amount
+				callbackSendToken1Amount: 0,
+			},
+			expectedToken0PoolBalanceChange: 15000000,
+			expectedToken1PoolBalanceChange: -14780173,
+		},
+		{
+			name: "zero for one swap is success for paid amount greater than specified amount",
+			poolInfo: swapPaidCreatePoolParams{
+				token0Path: barPath,
+				token1Path: bazPath,
+				feeTier:    FeeTier500,
+			},
+			positionInfo: []swapPaidMintPositionParams{
+				{
+					token0Path:       barPath,
+					token1Path:       bazPath,
+					feeTier:          FeeTier500,
+					tickLower:        -200,
+					tickUpper:        200,
+					amount0Requested: 10000000,
+					amount1Requested: 10000000,
+				},
+			},
+			swapInfo: swapPaidSwapParams{
+				token0Path:               barPath,
+				token1Path:               bazPath,
+				specifiedAmount:          "1000",
+				recipient:                adminAddr,
+				zeroForOne:               true,
+				sqrtPriceLimitX96:        MIN_PRICE,
+				callbackSendToken0Amount: 1001, // greater than specified amount
+				callbackSendToken1Amount: 0,
+			},
+			expectedToken0PoolBalanceChange: 1000,
+			expectedToken1PoolBalanceChange: -998,
+		},
+		{
+			name: "zero for one swap is failed for paid amount less than specified amount",
+			poolInfo: swapPaidCreatePoolParams{
+				token0Path: barPath,
+				token1Path: bazPath,
+				feeTier:    FeeTier500,
+			},
+			positionInfo: []swapPaidMintPositionParams{
+				{
+					token0Path:       barPath,
+					token1Path:       bazPath,
+					feeTier:          FeeTier500,
+					tickLower:        -200,
+					tickUpper:        200,
+					amount0Requested: 10000000,
+					amount1Requested: 10000000,
+				},
+			},
+			swapInfo: swapPaidSwapParams{
+				token0Path:               barPath,
+				token1Path:               bazPath,
+				specifiedAmount:          "1000",
+				recipient:                adminAddr,
+				zeroForOne:               true,
+				sqrtPriceLimitX96:        MIN_PRICE,
+				callbackSendToken0Amount: 999, // less than specified amount
+				callbackSendToken1Amount: 0,
+			},
+			expectedHasPanic:        true,
+			expectedHasPanicMessage: "[GNOSWAP-POOL-023] insufficient payment || insufficient payment: expected 1000, received 999",
+		},
+		{
+			name: "one for zero swap is success for paid amount equal to specified amount",
+			poolInfo: swapPaidCreatePoolParams{
+				token0Path: barPath,
+				token1Path: bazPath,
+				feeTier:    FeeTier500,
+			},
+			positionInfo: []swapPaidMintPositionParams{
+				{
+					token0Path:       barPath,
+					token1Path:       bazPath,
+					feeTier:          FeeTier500,
+					tickLower:        -200,
+					tickUpper:        200,
+					amount0Requested: 10000000,
+					amount1Requested: 10000000,
+				},
+			},
+			swapInfo: swapPaidSwapParams{
+				token0Path:               barPath,
+				token1Path:               bazPath,
+				specifiedAmount:          "1000",
+				recipient:                adminAddr,
+				zeroForOne:               false,
+				sqrtPriceLimitX96:        MAX_PRICE,
+				callbackSendToken0Amount: 0,
+				callbackSendToken1Amount: 1000, // equal to specified amount
+			},
+			expectedToken0PoolBalanceChange: -998,
+			expectedToken1PoolBalanceChange: 1000,
+		},
+		{
+			name: "one for zero swap is success for paid amount greater than specified amount",
+			poolInfo: swapPaidCreatePoolParams{
+				token0Path: barPath,
+				token1Path: bazPath,
+				feeTier:    FeeTier500,
+			},
+			positionInfo: []swapPaidMintPositionParams{
+				{
+					token0Path:       barPath,
+					token1Path:       bazPath,
+					feeTier:          FeeTier500,
+					tickLower:        -200,
+					tickUpper:        200,
+					amount0Requested: 10000000,
+					amount1Requested: 10000000,
+				},
+			},
+			swapInfo: swapPaidSwapParams{
+				token0Path:               barPath,
+				token1Path:               bazPath,
+				specifiedAmount:          "1000",
+				recipient:                adminAddr,
+				zeroForOne:               false,
+				sqrtPriceLimitX96:        MAX_PRICE,
+				callbackSendToken0Amount: 0,
+				callbackSendToken1Amount: 1001, // greater than specified amount
+			},
+			expectedToken0PoolBalanceChange: -998,
+			expectedToken1PoolBalanceChange: 1000,
+		},
+		{
+			name: "one for zero swap is failed for paid amount less than specified amount",
+			poolInfo: swapPaidCreatePoolParams{
+				token0Path: barPath,
+				token1Path: bazPath,
+				feeTier:    FeeTier500,
+			},
+			positionInfo: []swapPaidMintPositionParams{
+				{
+					token0Path:       barPath,
+					token1Path:       bazPath,
+					feeTier:          FeeTier500,
+					tickLower:        -200,
+					tickUpper:        200,
+					amount0Requested: 10000000,
+					amount1Requested: 10000000,
+				},
+			},
+			swapInfo: swapPaidSwapParams{
+				token0Path:               barPath,
+				token1Path:               bazPath,
+				specifiedAmount:          "1000",
+				recipient:                adminAddr,
+				zeroForOne:               false,
+				sqrtPriceLimitX96:        MAX_PRICE,
+				callbackSendToken0Amount: 0,
+				callbackSendToken1Amount: 999, // less than specified amount
+			},
+			expectedHasPanic:        true,
+			expectedHasPanicMessage: "[GNOSWAP-POOL-023] insufficient payment || insufficient payment: expected 1000, received 999",
+		},
+		{
+			name: "zero for one swap is success for partial paid amount",
+			poolInfo: swapPaidCreatePoolParams{
+				token0Path: barPath,
+				token1Path: bazPath,
+				feeTier:    FeeTier500,
+			},
+			positionInfo: []swapPaidMintPositionParams{
+				{
+					token0Path:       barPath,
+					token1Path:       bazPath,
+					feeTier:          FeeTier500,
+					tickLower:        -200,
+					tickUpper:        200,
+					amount0Requested: 10000000,
+					amount1Requested: 10000000,
+				},
+			},
+			swapInfo: swapPaidSwapParams{
+				token0Path:          barPath,
+				token1Path:          bazPath,
+				specifiedAmount:     "5000000",
+				recipient:           adminAddr,
+				zeroForOne:          true,
+				sqrtPriceLimitX96:   gnsmath.TickMathGetSqrtRatioAtTick(-10).ToString(),
+				isUseCallbackAmount: true,
+			},
+			expectedToken0PoolBalanceChange: 502882,
+			expectedToken1PoolBalanceChange: -502378,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			initSwapPaid(cur, t)
+			defer initSwapPaid(cur, t)
+
+			initSwapPaidCreatePool(cur, t, tt.poolInfo.token0Path, tt.poolInfo.token1Path, tt.poolInfo.feeTier)
+			for _, pos := range tt.positionInfo {
+				initSwapPaidSetFeeMintPosition(
+					cur,
+					t,
+					pos.token0Path,
+					pos.token1Path,
+					pos.feeTier,
+					pos.tickLower,
+					pos.tickUpper,
+					pos.amount0Requested,
+					pos.amount1Requested,
+				)
+			}
+
+			token0PoolBalanceChange := int64(0)
+			token1PoolBalanceChange := int64(0)
+
+			swapFn := func() (string, string) {
+				beforeToken0PoolBalance := common.BalanceOf(tt.swapInfo.token0Path, poolAddr)
+				beforeToken1PoolBalance := common.BalanceOf(tt.swapInfo.token1Path, poolAddr)
+
+				testing.SetRealm(testing.NewCodeRealm("gno.land/r/gnoswap/router"))
+				resultAmount0, resultAmount1 := mockInstanceSwap(
+					0, cur,
+					tt.swapInfo.token0Path,
+					tt.swapInfo.token1Path,
+					tt.poolInfo.feeTier,
+					tt.swapInfo.recipient,
+					tt.swapInfo.zeroForOne,
+					tt.swapInfo.specifiedAmount,
+					tt.swapInfo.sqrtPriceLimitX96,
+					func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
+						var currentAmount0Delta int64 = 0
+						var currentAmount1Delta int64 = 0
+
+						if tt.swapInfo.zeroForOne {
+							currentAmount0Delta = amount0Delta
+						} else {
+							currentAmount1Delta = amount1Delta
+						}
+
+						if !tt.swapInfo.isUseCallbackAmount {
+							currentAmount0Delta = tt.swapInfo.callbackSendToken0Amount
+							currentAmount1Delta = tt.swapInfo.callbackSendToken1Amount
+						}
+
+						return swapPaidSwapCallback(
+							cur,
+							tt.swapInfo.token0Path,
+							tt.swapInfo.token1Path,
+							currentAmount0Delta,
+							currentAmount1Delta,
+						)
+					},
+				)
+
+				token0PoolBalanceChange = common.BalanceOf(tt.swapInfo.token0Path, poolAddr) - beforeToken0PoolBalance
+				token1PoolBalanceChange = common.BalanceOf(tt.swapInfo.token1Path, poolAddr) - beforeToken1PoolBalance
+
+				return resultAmount0, resultAmount1
+			}
+
+			if tt.expectedHasPanic {
+				uassert.AbortsContains(t, cur, tt.expectedHasPanicMessage, func() {
+					swapFn()
+				})
+			} else {
+				resultAmount0, resultAmount1 := swapFn()
+				t.Logf("resultAmount0: %s, resultAmount1: %s", resultAmount0, resultAmount1)
+				uassert.Equal(t, true, token0PoolBalanceChange >= tt.expectedToken0PoolBalanceChange)
+				uassert.Equal(t, true, token1PoolBalanceChange >= tt.expectedToken1PoolBalanceChange)
+			}
+		})
+	}
+}
+
+func swapPaidSwapCallback(
+	cur realm,
+	token0Path string,
+	token1Path string,
+	amount0Delta int64,
+	amount1Delta int64,
+) error {
+	testing.SetRealm(adminRealm)
+
+	if amount0Delta > 0 {
+		common.SafeGRC20Transfer(cross(cur), token0Path, poolAddr, amount0Delta)
+	}
+	if amount1Delta > 0 {
+		common.SafeGRC20Transfer(cross(cur), token1Path, poolAddr, amount1Delta)
+	}
+
+	return nil
+}
+
+// test helpers
+func initSwapPaid(cur realm, t *testing.T) {
+	initPoolTest(cur, t)
+}
+
+func initSwapPaidCreatePool(cur realm, t *testing.T, token0Path, token1Path string, feeTier uint32) {
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+
+	mockInstanceSetPoolCreationFee(0, cur, 0)
+
+	if !getMockInstance().ExistsPoolPath(GetPoolPath(token0Path, token1Path, feeTier)) {
+		mockInstanceCreatePool(0, cur, token0Path, token1Path, feeTier, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString())
+	}
+}
+
+func initSwapPaidSetFeeMintPosition(
+	cur realm,
+	t *testing.T,
+	token0Path,
+	token1Path string,
+	feeTier uint32,
+	tickLower, tickUpper int32,
+	amount0Requested, amount1Requested int64,
+) {
+	const maxTimeout int64 = 9999999999
+
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+
+	testing.SetOriginSend(chain.Coins{})
+
+	if amount0Requested > 0 {
+		common.SafeGRC20Approve(cross(cur), token0Path, poolAddr, amount0Requested)
+	}
+
+	if amount1Requested > 0 {
+		common.SafeGRC20Approve(cross(cur), token1Path, poolAddr, amount1Requested)
+	}
+
+	sqrtPriceX96 := getMockInstance().GetSlot0SqrtPriceX96(GetPoolPath(token0Path, token1Path, feeTier))
+	sqrtRatioAX96 := gnsmath.TickMathGetSqrtRatioAtTick(tickLower)
+	sqrtRatioBX96 := gnsmath.TickMathGetSqrtRatioAtTick(tickUpper)
+
+	liquidity := gnsmath.GetLiquidityForAmounts(
+		sqrtPriceX96,
+		sqrtRatioAX96,
+		sqrtRatioBX96,
+		uint256.NewUintFromInt64(amount0Requested),
+		uint256.NewUintFromInt64(amount1Requested),
+	)
+
+	testing.SetRealm(posRealm)
+	mockInstanceMint(
+		0, cur,
+		token0Path,
+		token1Path,
+		feeTier,
+		tickLower,
+		tickUpper,
+		liquidity.ToString(),
+		adminAddr,
+	)
+}
+
+type swapPaidCreatePoolParams struct {
+	token0Path string
+	token1Path string
+	feeTier    uint32
+}
+
+type swapPaidMintPositionParams struct {
+	token0Path       string
+	token1Path       string
+	feeTier          uint32
+	tickLower        int32
+	tickUpper        int32
+	amount0Requested int64
+	amount1Requested int64
+}
+
+type swapPaidSwapParams struct {
+	token0Path               string
+	token1Path               string
+	specifiedAmount          string
+	recipient                address
+	zeroForOne               bool
+	sqrtPriceLimitX96        string
+	isUseCallbackAmount      bool
+	callbackSendToken0Amount int64
+	callbackSendToken1Amount int64
+}

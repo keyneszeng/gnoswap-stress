@@ -1,0 +1,812 @@
+package emission
+
+import (
+	"math"
+	"testing"
+
+	uassert "gno.land/p/nt/uassert/v0"
+
+	"gno.land/r/gnoswap/gns"
+)
+
+func TestCalculateAmount_SecurityValidation(cur realm, t *testing.T) {
+	tests := []struct {
+		name                 string
+		amount               int64
+		bptPct               int64
+		expectedResult       int64
+		expectedHasPanic     bool
+		expectedPanicMessage string
+	}{
+		{
+			name:             "Valid calculation",
+			amount:           1000,
+			bptPct:           7500,
+			expectedResult:   750,
+			expectedHasPanic: false,
+		},
+		{
+			name:                 "Negative amount should panic",
+			amount:               -1000,
+			bptPct:               7500,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "invalid amount or bptPct",
+		},
+		{
+			name:                 "Negative percentage should panic",
+			amount:               1000,
+			bptPct:               -100,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "invalid amount or bptPct",
+		},
+		{
+			name:                 "Percentage over 100% should panic",
+			amount:               1000,
+			bptPct:               10001,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "invalid amount or bptPct",
+		},
+		{
+			name:                 "Amount too large should panic",
+			amount:               9223372036854775807,
+			bptPct:               10000,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "amount too large, would cause overflow",
+		},
+		{
+			name:             "Zero percentage should return zero",
+			amount:           1000,
+			bptPct:           0,
+			expectedResult:   0,
+			expectedHasPanic: false,
+		},
+		{
+			name:             "Maximum safe amount",
+			amount:           922337203685477,
+			bptPct:           10000,
+			expectedResult:   922337203685477,
+			expectedHasPanic: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(cur realm, t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					if tc.expectedHasPanic {
+						uassert.Equal(t, tc.expectedPanicMessage, r.(string))
+					} else {
+						t.Errorf("[%s] unexpected panic: %v", tc.name, r)
+					}
+				}
+			}()
+
+			// when
+			result := calculateAmount(tc.amount, tc.bptPct)
+
+			// then
+			if !tc.expectedHasPanic {
+				uassert.Equal(t, tc.expectedResult, result)
+			}
+		})
+	}
+}
+
+func TestSetLeftGNSAmount_SecurityValidation(cur realm, t *testing.T) {
+	tests := []struct {
+		name                 string
+		amount               int64
+		expectedHasPanic     bool
+		expectedPanicMessage string
+	}{
+		{
+			name:             "Valid positive amount",
+			amount:           1000,
+			expectedHasPanic: false,
+		},
+		{
+			name:             "Zero amount",
+			amount:           0,
+			expectedHasPanic: false,
+		},
+		{
+			name:                 "Negative amount should panic",
+			amount:               -100,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "left GNS amount cannot be negative",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(cur realm, t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					if tc.expectedHasPanic {
+						uassert.Equal(t, tc.expectedPanicMessage, r.(string))
+					} else {
+						t.Errorf("[%s] unexpected panic: %v", tc.name, r)
+					}
+				}
+			}()
+
+			resetObject(t)
+
+			// when
+			setLeftGNSAmount(tc.amount)
+
+			// then
+			if !tc.expectedHasPanic {
+				uassert.Equal(t, tc.amount, GetLeftGNSAmount())
+			}
+		})
+	}
+}
+
+func TestSetLastExecutedHeight_SecurityValidation(cur realm, t *testing.T) {
+	tests := []struct {
+		name                 string
+		timestamp            int64
+		expectedHasPanic     bool
+		expectedPanicMessage string
+	}{
+		{
+			name:             "Valid positive timestamp",
+			timestamp:        1000,
+			expectedHasPanic: false,
+		},
+		{
+			name:             "Zero timestamp",
+			timestamp:        0,
+			expectedHasPanic: false,
+		},
+		{
+			name:                 "Negative timestamp should panic",
+			timestamp:            -100,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "last executed timestamp cannot be negative",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(cur realm, t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					if tc.expectedHasPanic {
+						uassert.Equal(t, tc.expectedPanicMessage, r.(string))
+					} else {
+						t.Errorf("[%s] unexpected panic: %v", tc.name, r)
+					}
+				}
+			}()
+
+			resetObject(t)
+
+			// when
+			setLastExecutedTimestamp(tc.timestamp)
+
+			// then
+			if !tc.expectedHasPanic {
+				uassert.Equal(t, tc.timestamp, GetLastExecutedTimestamp())
+			}
+		})
+	}
+}
+
+func TestAssertValidDistributionPct_SecurityValidation(cur realm, t *testing.T) {
+	tests := []struct {
+		name                 string
+		pct01                int64
+		pct02                int64
+		pct03                int64
+		pct04                int64
+		expectedHasPanic     bool
+		expectedPanicMessage string
+	}{
+		{
+			name:             "Valid percentages that sum to 100%",
+			pct01:            2500,
+			pct02:            2500,
+			pct03:            2500,
+			pct04:            2500,
+			expectedHasPanic: false,
+		},
+		{
+			name:                 "Sum exceeds 100%",
+			pct01:                3000,
+			pct02:                3000,
+			pct03:                3000,
+			pct04:                2000,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "[GNOSWAP-EMISSION-002] invalid emission percentage || sum of percentages must be 10000, got 11000",
+		},
+		{
+			name:                 "Sum less than 100%",
+			pct01:                2000,
+			pct02:                2000,
+			pct03:                2000,
+			pct04:                2000,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "[GNOSWAP-EMISSION-002] invalid emission percentage || sum of percentages must be 10000, got 8000",
+		},
+		{
+			name:                 "Negative percentage 1",
+			pct01:                -1000,
+			pct02:                4000,
+			pct03:                3000,
+			pct04:                4000,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "[GNOSWAP-EMISSION-002] invalid emission percentage || percentage 1 cannot be negative: -1000",
+		},
+		{
+			name:                 "Percentage exceeds 100%",
+			pct01:                15000,
+			pct02:                0,
+			pct03:                0,
+			pct04:                0,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "[GNOSWAP-EMISSION-002] invalid emission percentage || percentage 1 cannot exceed 100%: 15000",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(cur realm, t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					if tc.expectedHasPanic {
+						if errStr, ok := r.(string); ok {
+							uassert.Equal(t, tc.expectedPanicMessage, errStr)
+						} else {
+							uassert.Equal(t, tc.expectedPanicMessage, r.(error).Error())
+						}
+					} else {
+						t.Errorf("[%s] unexpected panic: %v", tc.name, r)
+					}
+				}
+			}()
+
+			// when
+			assertValidDistributionPct(tc.pct01, tc.pct02, tc.pct03, tc.pct04)
+
+			// then - if no panic expected, test passes
+		})
+	}
+}
+
+// Test the calculateAmount function in isolation
+func TestCalculateAmount_IsolatedSecurity(cur realm, t *testing.T) {
+	tests := []struct {
+		name                 string
+		amount               int64
+		bptPct               int64
+		expectedResult       int64
+		expectedHasPanic     bool
+		expectedPanicMessage string
+	}{
+		{
+			name:           "Valid calculation 75%",
+			amount:         1000,
+			bptPct:         7500,
+			expectedResult: 750,
+		},
+		{
+			name:           "Zero percentage",
+			amount:         1000,
+			bptPct:         0,
+			expectedResult: 0,
+		},
+		{
+			name:           "Maximum safe amount",
+			amount:         922337203685477,
+			bptPct:         10000,
+			expectedResult: 922337203685477,
+		},
+		{
+			name:                 "Negative amount should panic",
+			amount:               -1000,
+			bptPct:               7500,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "invalid amount or bptPct",
+		},
+		{
+			name:                 "Overflow amount should panic",
+			amount:               9223372036854775807,
+			bptPct:               10000,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "amount too large, would cause overflow",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(cur realm, t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					if tc.expectedHasPanic {
+						uassert.Equal(t, tc.expectedPanicMessage, r.(string))
+					} else {
+						t.Errorf("[%s] unexpected panic: %v", tc.name, r)
+					}
+				}
+			}()
+
+			// given - test parameters are set in table
+
+			// when
+			result := calculateAmount(tc.amount, tc.bptPct)
+
+			// then
+			if !tc.expectedHasPanic {
+				uassert.Equal(t, tc.expectedResult, result)
+			}
+		})
+	}
+}
+
+func TestAssertValidDistributionPct_IsolatedSecurity(cur realm, t *testing.T) {
+	tests := []struct {
+		name                 string
+		pct01                int64
+		pct02                int64
+		pct03                int64
+		pct04                int64
+		expectedHasPanic     bool
+		expectedPanicMessage string
+	}{
+		{
+			name:  "Valid percentages sum to 100%",
+			pct01: 2500,
+			pct02: 2500,
+			pct03: 2500,
+			pct04: 2500,
+		},
+		{
+			name:                 "Negative percentage should panic",
+			pct01:                -1000,
+			pct02:                4000,
+			pct03:                3000,
+			pct04:                4000,
+			expectedHasPanic:     true,
+			expectedPanicMessage: "[GNOSWAP-EMISSION-002] invalid emission percentage || percentage 1 cannot be negative: -1000",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(cur realm, t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					if tc.expectedHasPanic {
+						// Handle both string and error types
+						var actual string
+						if err, ok := r.(error); ok {
+							actual = err.Error()
+						} else if str, ok := r.(string); ok {
+							actual = str
+						} else {
+							t.Errorf("Unexpected panic type: %T", r)
+							return
+						}
+						uassert.Equal(t, tc.expectedPanicMessage, actual)
+					} else {
+						t.Errorf("[%s] unexpected panic: %v", tc.name, r)
+					}
+				}
+			}()
+
+			// given - test parameters are set in table
+
+			// when
+			assertValidDistributionPct(tc.pct01, tc.pct02, tc.pct03, tc.pct04)
+
+			// then - if no panic expected, test passes
+		})
+	}
+}
+
+// TestAssertValidDistributionTarget tests validation of single distribution targets
+func TestAssertValidDistributionTarget(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		target      int
+		shouldPanic bool
+		panicMsg    string
+	}{
+		{
+			name:        "Valid target LIQUIDITY_STAKER",
+			target:      LIQUIDITY_STAKER,
+			shouldPanic: false,
+		},
+		{
+			name:        "Valid target DEVOPS",
+			target:      DEVOPS,
+			shouldPanic: false,
+		},
+		{
+			name:        "Valid target COMMUNITY_POOL",
+			target:      COMMUNITY_POOL,
+			shouldPanic: false,
+		},
+		{
+			name:        "Valid target GOV_STAKER",
+			target:      GOV_STAKER,
+			shouldPanic: false,
+		},
+		{
+			name:        "Invalid target 0",
+			target:      0,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-EMISSION-001] invalid emission target || invalid target(0)",
+		},
+		{
+			name:        "Invalid target -1",
+			target:      -1,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-EMISSION-001] invalid emission target || invalid target(-1)",
+		},
+		{
+			name:        "Invalid target 5",
+			target:      5,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-EMISSION-001] invalid emission target || invalid target(5)",
+		},
+		{
+			name:        "Invalid target 999",
+			target:      999,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-EMISSION-001] invalid emission target || invalid target(999)",
+		},
+		{
+			name:        "Invalid target max int",
+			target:      2147483647,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-EMISSION-001] invalid emission target || invalid target(2147483647)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			if tt.shouldPanic {
+				uassert.PanicsWithMessage(
+					t, cur, tt.panicMsg, func() {
+						assertValidDistributionTarget(tt.target)
+					})
+			} else {
+				uassert.NotPanics(
+					t, cur, func() {
+						assertValidDistributionTarget(tt.target)
+					})
+			}
+		})
+	}
+}
+
+// TestTransferToTarget_CEIPattern tests the Checks-Effects-Interactions pattern
+// This verifies that state is updated BEFORE external calls (gns.Transfer)
+func TestTransferToTarget_CEIPattern(cur realm, t *testing.T) {
+	tests := []struct {
+		name                         string
+		description                  string
+		target                       int
+		targetName                   string
+		amount                       int64
+		initialDistributed           int64
+		initialAccuDistributed       int64
+		expectedDistributedAfter     int64
+		expectedAccuDistributedAfter int64
+		expectedBalanceChange        int64
+		setupBalance                 bool
+		balanceToSetup               int64
+	}{
+		{
+			name:                         "CEI pattern for LIQUIDITY_STAKER",
+			description:                  "state should be updated before transfer",
+			target:                       LIQUIDITY_STAKER,
+			targetName:                   "LIQUIDITY_STAKER",
+			amount:                       1000,
+			initialDistributed:           0,
+			initialAccuDistributed:       0,
+			expectedDistributedAfter:     1000,
+			expectedAccuDistributedAfter: 1000,
+			expectedBalanceChange:        1000,
+			setupBalance:                 true,
+			balanceToSetup:               10000,
+		},
+		{
+			name:                         "CEI pattern for DEVOPS",
+			description:                  "state should be updated before transfer",
+			target:                       DEVOPS,
+			targetName:                   "DEVOPS",
+			amount:                       500,
+			initialDistributed:           100,
+			initialAccuDistributed:       200,
+			expectedDistributedAfter:     600,
+			expectedAccuDistributedAfter: 700,
+			expectedBalanceChange:        500,
+			setupBalance:                 true,
+			balanceToSetup:               10000,
+		},
+		{
+			name:                         "CEI pattern for COMMUNITY_POOL",
+			description:                  "state should be updated before transfer",
+			target:                       COMMUNITY_POOL,
+			targetName:                   "COMMUNITY_POOL",
+			amount:                       250,
+			initialDistributed:           50,
+			initialAccuDistributed:       100,
+			expectedDistributedAfter:     300,
+			expectedAccuDistributedAfter: 350,
+			expectedBalanceChange:        250,
+			setupBalance:                 true,
+			balanceToSetup:               10000,
+		},
+		{
+			name:                         "CEI pattern for GOV_STAKER",
+			description:                  "state should be updated before transfer",
+			target:                       GOV_STAKER,
+			targetName:                   "GOV_STAKER",
+			amount:                       750,
+			initialDistributed:           0,
+			initialAccuDistributed:       0,
+			expectedDistributedAfter:     750,
+			expectedAccuDistributedAfter: 750,
+			expectedBalanceChange:        750,
+			setupBalance:                 true,
+			balanceToSetup:               10000,
+		},
+		{
+			name:                         "cumulative distribution to LIQUIDITY_STAKER",
+			description:                  "multiple transfers should accumulate correctly",
+			target:                       LIQUIDITY_STAKER,
+			targetName:                   "LIQUIDITY_STAKER",
+			amount:                       500,
+			initialDistributed:           1000,
+			initialAccuDistributed:       5000,
+			expectedDistributedAfter:     1500,
+			expectedAccuDistributedAfter: 5500,
+			expectedBalanceChange:        500,
+			setupBalance:                 true,
+			balanceToSetup:               10000,
+		},
+		{
+			name:                         "transfer gns minimum amount",
+			description:                  "change state before transfer",
+			target:                       LIQUIDITY_STAKER,
+			targetName:                   "LIQUIDITY_STAKER",
+			amount:                       1,
+			initialDistributed:           1000,
+			initialAccuDistributed:       1000,
+			expectedDistributedAfter:     1001,
+			expectedAccuDistributedAfter: 1001,
+			expectedBalanceChange:        1,
+			setupBalance:                 true,
+			balanceToSetup:               1,
+		},
+		{
+			name:                         "panic on transfer gns amount",
+			description:                  "change state before transfer",
+			target:                       LIQUIDITY_STAKER,
+			targetName:                   "LIQUIDITY_STAKER",
+			amount:                       math.MaxInt64,
+			initialDistributed:           1000,
+			initialAccuDistributed:       1000,
+			expectedDistributedAfter:     1000,
+			expectedAccuDistributedAfter: 1000,
+			expectedBalanceChange:        0,
+			setupBalance:                 false,
+			balanceToSetup:               0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			resetObject(t)
+
+			// Setup initial state based on target
+			switch tt.target {
+			case LIQUIDITY_STAKER:
+				distributedToStaker = tt.initialDistributed
+				accuDistributedToStaker = tt.initialAccuDistributed
+			case DEVOPS:
+				distributedToDevOps = tt.initialDistributed
+				accuDistributedToDevOps = tt.initialAccuDistributed
+			case COMMUNITY_POOL:
+				distributedToCommunityPool = tt.initialDistributed
+				accuDistributedToCommunityPool = tt.initialAccuDistributed
+			case GOV_STAKER:
+				distributedToGovStaker = tt.initialDistributed
+				accuDistributedToGovStaker = tt.initialAccuDistributed
+			}
+
+			// Setup balance for emission
+			if tt.setupBalance {
+				testing.SetRealm(adminRealm)
+				gns.Transfer(cross(cur), emissionAddr, tt.balanceToSetup)
+			}
+
+			// Execute transfer
+			var balanceChange int64
+
+			var err error
+
+			transferToTargetFunc := func(cur realm) error {
+				testing.SetRealm(emissionRealm)
+				targets := map[int]int64{tt.target: tt.amount}
+				amountByAddress, err := applyDistribution(targets)
+				if err != nil {
+					return err
+				}
+
+				beforeBalance := gns.BalanceOf(emissionAddr)
+
+				err = transferToTarget(0, cur, amountByAddress)
+				if err != nil {
+					return err
+				}
+
+				balanceChange = beforeBalance - gns.BalanceOf(emissionAddr)
+
+				return nil
+			}
+
+			if !tt.setupBalance {
+				uassert.AbortsContains(t, cur, "overflow", func() {
+					_ = transferToTargetFunc(cross(cur))
+				})
+
+				return
+			} else {
+				err = transferToTargetFunc(cross(cur))
+			}
+
+			uassert.NoError(t, err)
+
+			// Verify state was updated correctly (CEI pattern confirmation)
+			switch tt.target {
+			case LIQUIDITY_STAKER:
+				uassert.Equal(t, tt.expectedDistributedAfter, distributedToStaker)
+				uassert.Equal(t, tt.expectedAccuDistributedAfter, accuDistributedToStaker)
+			case DEVOPS:
+				uassert.Equal(t, tt.expectedDistributedAfter, distributedToDevOps)
+				uassert.Equal(t, tt.expectedAccuDistributedAfter, accuDistributedToDevOps)
+			case COMMUNITY_POOL:
+				uassert.Equal(t, tt.expectedDistributedAfter, distributedToCommunityPool)
+				uassert.Equal(t, tt.expectedAccuDistributedAfter, accuDistributedToCommunityPool)
+			case GOV_STAKER:
+				uassert.Equal(t, tt.expectedDistributedAfter, distributedToGovStaker)
+				uassert.Equal(t, tt.expectedAccuDistributedAfter, accuDistributedToGovStaker)
+			}
+
+			uassert.Equal(t, tt.expectedBalanceChange, balanceChange)
+		})
+	}
+}
+
+// TestAccumulatedDistribution_SafeMath tests safe math for accumulated distribution values
+func TestAccumulatedDistribution_SafeMath(cur realm, t *testing.T) {
+	tests := []struct {
+		name                    string
+		description             string
+		target                  int
+		targetName              string
+		initialDistributed      int64
+		initialAccuDistributed  int64
+		amountToAdd             int64
+		expectedDistributed     int64
+		expectedAccuDistributed int64
+		shouldPanic             bool
+		panicMessage            string
+	}{
+		{
+			name:                    "normal accumulation for LIQUIDITY_STAKER",
+			description:             "adding normal amount should work correctly",
+			target:                  LIQUIDITY_STAKER,
+			targetName:              "LIQUIDITY_STAKER",
+			initialDistributed:      1000,
+			initialAccuDistributed:  5000,
+			amountToAdd:             500,
+			expectedDistributed:     1500,
+			expectedAccuDistributed: 5500,
+			shouldPanic:             false,
+		},
+		{
+			name:                    "zero amount addition",
+			description:             "adding zero should not change values",
+			target:                  DEVOPS,
+			targetName:              "DEVOPS",
+			initialDistributed:      100,
+			initialAccuDistributed:  200,
+			amountToAdd:             0,
+			expectedDistributed:     100,
+			expectedAccuDistributed: 200,
+			shouldPanic:             false,
+		},
+		{
+			name:                    "large but safe accumulation",
+			description:             "large values within int64 range should work",
+			target:                  COMMUNITY_POOL,
+			targetName:              "COMMUNITY_POOL",
+			initialDistributed:      1000000000000,
+			initialAccuDistributed:  5000000000000,
+			amountToAdd:             1000000000000,
+			expectedDistributed:     2000000000000,
+			expectedAccuDistributed: 6000000000000,
+			shouldPanic:             false,
+		},
+		{
+			name:                    "overflow detection for distributed amount",
+			description:             "adding to near-max value should panic",
+			target:                  GOV_STAKER,
+			targetName:              "GOV_STAKER",
+			initialDistributed:      math.MaxInt64 - 100,
+			initialAccuDistributed:  0,
+			amountToAdd:             200,
+			expectedDistributed:     0,
+			expectedAccuDistributed: 0,
+			shouldPanic:             true,
+			panicMessage:            "int64 addition overflow",
+		},
+		{
+			name:                    "overflow detection for accumulated amount",
+			description:             "accumulated amount overflow should panic",
+			target:                  LIQUIDITY_STAKER,
+			targetName:              "LIQUIDITY_STAKER",
+			initialDistributed:      0,
+			initialAccuDistributed:  math.MaxInt64 - 50,
+			amountToAdd:             100,
+			expectedDistributed:     0,
+			expectedAccuDistributed: 0,
+			shouldPanic:             true,
+			panicMessage:            "int64 addition overflow",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			resetObject(t)
+
+			// Setup initial state
+			switch tt.target {
+			case LIQUIDITY_STAKER:
+				distributedToStaker = tt.initialDistributed
+				accuDistributedToStaker = tt.initialAccuDistributed
+			case DEVOPS:
+				distributedToDevOps = tt.initialDistributed
+				accuDistributedToDevOps = tt.initialAccuDistributed
+			case COMMUNITY_POOL:
+				distributedToCommunityPool = tt.initialDistributed
+				accuDistributedToCommunityPool = tt.initialAccuDistributed
+			case GOV_STAKER:
+				distributedToGovStaker = tt.initialDistributed
+				accuDistributedToGovStaker = tt.initialAccuDistributed
+			}
+
+			// Setup balance for emission
+			testing.SetRealm(adminRealm)
+			gns.Transfer(cross(cur), emissionAddr, 1000000000)
+
+			if tt.shouldPanic {
+				uassert.PanicsWithMessage(
+					t, cur, tt.panicMessage, func() {
+						_, _ = applyDistribution(map[int]int64{tt.target: tt.amountToAdd})
+					})
+			} else {
+				_, err := applyDistribution(map[int]int64{tt.target: tt.amountToAdd})
+				uassert.NoError(t, err)
+
+				// Verify final state
+				switch tt.target {
+				case LIQUIDITY_STAKER:
+					uassert.Equal(t, tt.expectedDistributed, distributedToStaker)
+					uassert.Equal(t, tt.expectedAccuDistributed, accuDistributedToStaker)
+				case DEVOPS:
+					uassert.Equal(t, tt.expectedDistributed, distributedToDevOps)
+					uassert.Equal(t, tt.expectedAccuDistributed, accuDistributedToDevOps)
+				case COMMUNITY_POOL:
+					uassert.Equal(t, tt.expectedDistributed, distributedToCommunityPool)
+					uassert.Equal(t, tt.expectedAccuDistributed, accuDistributedToCommunityPool)
+				case GOV_STAKER:
+					uassert.Equal(t, tt.expectedDistributed, distributedToGovStaker)
+					uassert.Equal(t, tt.expectedAccuDistributed, accuDistributedToGovStaker)
+				}
+			}
+		})
+	}
+}

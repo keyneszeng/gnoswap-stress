@@ -1,0 +1,85 @@
+// PKGPATH: gno.land/r/demo/main
+
+package main
+
+import (
+	"testing"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	uassert "gno.land/p/nt/uassert/v0"
+
+	"gno.land/r/gnoswap/access"
+
+	"gno.land/r/gnoswap/pool"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+)
+
+var t *testing.T
+
+// Constants for fee tiers
+const (
+	FeeTier100 uint32 = 100
+	FeeTier500 uint32 = 500
+)
+
+// Variables for test addresses and realms
+var (
+	adminAddr, _    = access.GetAddress(prbac.ROLE_ADMIN.String())
+	positionAddr, _ = access.GetAddress(prbac.ROLE_POSITION.String())
+	posRealm        = testing.NewUserRealm(positionAddr)
+)
+
+func main(cur realm) {
+	testNonExistentPoolBurn(cur)
+}
+
+// testNonExistentPoolBurn tests burning from non-existent pool (should abort)
+func testNonExistentPoolBurn(cur realm) {
+	// Given: No pool exists
+	barTokenPath := "gno.land/r/onbloc/bar.BAR"
+	bazTokenPath := "gno.land/r/onbloc/baz.BAZ"
+	fee := FeeTier500
+	tickLower := int32(-100)
+	tickUpper := int32(100)
+	burnAmount := "1000000"
+
+	println("[INFO] Attempting to burn from non-existent pool")
+	println("[INFO] Token0:", barTokenPath)
+	println("[INFO] Token1:", bazTokenPath)
+	println("[INFO] Fee tier:", fee)
+	println("[INFO] Tick range:", tickLower, "to", tickUpper)
+	println("[INFO] Burn amount:", burnAmount)
+
+	// When: Try to burn from non-existent pool
+	testing.SetRealm(posRealm)
+
+	// Then: Should abort with specific error message
+	expectedAbortMsg := "[GNOSWAP-POOL-005] requested data not found || expected poolPath(gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500) to exist"
+	println("[EXPECTED] Should abort with message:", expectedAbortMsg)
+
+	uassert.AbortsWithMessage(t, cur, expectedAbortMsg, func() {
+		pool.Burn(
+			cross(cur),
+			barTokenPath,
+			bazTokenPath,
+			fee,
+			tickLower,
+			tickUpper,
+			burnAmount,
+			adminAddr,
+		)
+	})
+
+	println("[SCENARIO] 4. Non-existent Pool Burn - PASSED")
+}
+
+// Output:
+// [INFO] Attempting to burn from non-existent pool
+// [INFO] Token0: gno.land/r/onbloc/bar.BAR
+// [INFO] Token1: gno.land/r/onbloc/baz.BAZ
+// [INFO] Fee tier: 500
+// [INFO] Tick range: -100 to 100
+// [INFO] Burn amount: 1000000
+// [EXPECTED] Should abort with message: [GNOSWAP-POOL-005] requested data not found || expected poolPath(gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500) to exist
+// [SCENARIO] 4. Non-existent Pool Burn - PASSED

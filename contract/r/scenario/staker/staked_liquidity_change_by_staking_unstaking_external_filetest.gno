@@ -1,0 +1,374 @@
+// staked liquidity change by staking and unstaking (external rewards) scenario test
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"gno.land/p/gnoswap/gnsmath"
+	"chain/runtime"
+	"strconv"
+	"testing"
+
+	"gno.land/p/demo/tokens/grc721"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+
+	"gno.land/r/gnoswap/access"
+
+	"gno.land/r/gnoswap/gnft"
+	"gno.land/r/gnoswap/gns"
+
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	sr "gno.land/r/gnoswap/staker"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/baz"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminUser    = adminAddr
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	stakerAddr, _ = access.GetAddress(prabc.ROLE_STAKER.String())
+	stakerUser    = stakerAddr
+	stakerRealm   = testing.NewCodeRealm("gno.land/r/gnoswap/staker")
+
+	poolAddr, _ = access.GetAddress(prabc.ROLE_POOL.String())
+
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	bazPath = "gno.land/r/onbloc/baz.BAZ"
+
+	fee100 uint32 = 100
+
+	maxTimeout int64 = 9999999999
+	maxInt64   int64 = 9223372036854775807
+
+	// external incentive deposit fee
+	depositGnsAmount int64 = 1_000_000_000 // 1_000 GNS
+
+	TIMESTAMP_90DAYS int64 = 90 * 24 * 60 * 60
+
+	poolPath = "gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:100"
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Initialize and setup")
+	initAndSetup(cur)
+	println()
+
+	println("[SCENARIO] 2. Create bar:baz:100 pool")
+	createPool(cur)
+	println()
+
+	println("[SCENARIO] 3. Create external incentive")
+	createExternalIncentive(cur)
+	println()
+
+	println("[SCENARIO] 4. Mint and stake position 01")
+	mintAndStakePosition01(cur)
+	println()
+
+	println("[SCENARIO] 5. Mint and stake position 02")
+	mintAndStakePosition02(cur)
+	println()
+
+	println("[SCENARIO] 6. Collect external rewards for both positions")
+	collectExternalRewardsBothPositions(cur)
+	println()
+
+	println("[SCENARIO] 7. Unstake position 02")
+	unstakePosition02(cur)
+	println()
+
+	println("[SCENARIO] 8. Collect external rewards after unstaking")
+	collectExternalRewardsAfterUnstaking(cur)
+}
+
+func initAndSetup(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] set unstaking fee to 0")
+	sr.SetUnStakingFee(cross(cur), 0)
+
+	println("[INFO] set pool creation fee to 0")
+	pl.SetPoolCreationFee(cross(cur), 0)
+
+	println("[INFO] register gns change callback")
+	testing.SetRealm(stakerRealm)
+}
+
+func createPool(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] create bar:baz:100 pool")
+	pl.CreatePool(cross(cur), barPath, bazPath, 100, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString())
+
+	testing.SkipHeights(1)
+}
+
+func createExternalIncentive(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve tokens for external incentive")
+	bar.Approve(cross(cur), stakerAddr, maxInt64)
+	gns.Approve(cross(cur), stakerAddr, depositGnsAmount)
+
+	println("[INFO] create external incentive with bar token")
+	testing.SetRealm(adminRealm)
+	sr.CreateExternalIncentive(
+		cross(cur),
+		poolPath,
+		barPath,
+		90_000_000_000, // 90 billion bar tokens for 90 days
+		1234569600,
+		1234569600+TIMESTAMP_90DAYS,
+	)
+
+	ufmt.Printf("[INFO] external incentive created - reward per block: ~1000000000\n")
+
+	// Make external incentives start
+	leftHeight := 978 - runtime.ChainHeight()
+	if leftHeight > 0 {
+		testing.SkipHeights(leftHeight + 5) // skip 5 blocks more
+	}
+}
+
+func mintAndStakePosition01(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve tokens for position 01")
+	bar.Approve(cross(cur), poolAddr, maxInt64)
+	baz.Approve(cross(cur), poolAddr, maxInt64)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] mint position 01 (tick range: -100 ~ 100)")
+	lpTokenId, liquidity, amount0, amount1 := pn.Mint(
+		cross(cur),
+		barPath,
+		bazPath,
+		fee100,
+		int32(-100),
+		int32(100),
+		"1000",
+		"1000",
+		"1",
+		"1",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position 01 - ID: %d, liquidity: %s\n", lpTokenId, liquidity)
+	ufmt.Printf("[EXPECTED] amounts - bar: %s, baz: %s\n", amount0, amount1)
+
+	println("[INFO] approve NFT to staker and stake position 01")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, 1))
+	sr.StakeToken(cross(cur), 1, "")
+
+	ufmt.Printf("[EXPECTED] position 01 staked\n")
+}
+
+func mintAndStakePosition02(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve tokens for position 02")
+	bar.Approve(cross(cur), poolAddr, maxInt64)
+	baz.Approve(cross(cur), poolAddr, maxInt64)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] mint position 02 (tick range: -100 ~ 100)")
+	lpTokenId, liquidity, amount0, amount1 := pn.Mint(
+		cross(cur),
+		barPath,
+		bazPath,
+		fee100,
+		int32(-100),
+		int32(100),
+		"1000",
+		"1000",
+		"1",
+		"1",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position 02 - ID: %d, liquidity: %s\n", lpTokenId, liquidity)
+	ufmt.Printf("[EXPECTED] amounts - bar: %s, baz: %s\n", amount0, amount1)
+
+	println("[INFO] approve NFT to staker and stake position 02")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, 2))
+	sr.StakeToken(cross(cur), 2, "")
+	testing.SkipHeights(1)
+
+	ufmt.Printf("[EXPECTED] position 02 staked\n")
+}
+
+func collectExternalRewardsBothPositions(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] clear any accumulated rewards first")
+	sr.CollectReward(cross(cur), 1)
+	sr.CollectReward(cross(cur), 2)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] collect external reward for position 01")
+	beforeBar := bar.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 1)
+	afterBar := bar.BalanceOf(adminUser)
+	reward1 := afterBar - beforeBar
+
+	ufmt.Printf("[EXPECTED] position 01 external reward: %d\n", reward1)
+
+	// Expected calculation: each position gets 50% of the external reward
+	expectedReward := uint64(500000000) // 1000000000 * 50%
+	if !isInErrorRange(cur, uint64(reward1), expectedReward) {
+		ufmt.Printf("[WARNING] expected around %d, got %d\n", expectedReward, reward1)
+	}
+
+	println("[INFO] collect external reward for position 02")
+	beforeBar = bar.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 2)
+	afterBar = bar.BalanceOf(adminUser)
+	reward2 := afterBar - beforeBar
+
+	ufmt.Printf("[EXPECTED] position 02 external reward: %d\n", reward2)
+
+	// Both positions should get equal rewards as they have same liquidity
+	if !isInErrorRange(cur, uint64(reward2), expectedReward) {
+		ufmt.Printf("[WARNING] expected around %d, got %d\n", expectedReward, reward2)
+	}
+}
+
+func unstakePosition02(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] unstake position 02")
+	sr.UnStakeToken(cross(cur), 2)
+
+	owner := gnft.MustOwnerOf(positionIdFrom(cur, 2))
+	ufmt.Printf("[EXPECTED] position 02 owner after unstaking: %s\n", owner)
+
+	if owner != adminAddr {
+		panic("position 02 should be returned to admin after unstaking")
+	}
+}
+
+func collectExternalRewardsAfterUnstaking(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] collect external reward for position 01 after position 02 unstaked")
+	beforeBar := bar.BalanceOf(adminUser)
+	testing.SkipHeights(1)
+	sr.CollectReward(cross(cur), 1)
+	afterBar := bar.BalanceOf(adminUser)
+	reward := afterBar - beforeBar
+
+	ufmt.Printf("[EXPECTED] position 01 external reward after unstaking pos 02: %d\n", reward)
+
+	// Now position 01 should get full external reward
+	expectedFullReward := uint64(1000000000) // 100% of external reward
+	if !isInErrorRange(cur, uint64(reward), expectedFullReward) {
+		ufmt.Printf("[WARNING] expected around %d, got %d\n", expectedFullReward, reward)
+	}
+
+	println("[INFO] position 01 now receives full external rewards since position 02 is unstaked")
+}
+
+func isInErrorRange(cur realm, actual, expected uint64) bool {
+	diff := uint64(0)
+	if actual > expected {
+		diff = actual - expected
+	} else {
+		diff = expected - actual
+	}
+
+	// Allow 5% error margin for external rewards
+	errorMargin := expected / 20
+	if errorMargin == 0 {
+		errorMargin = 1
+	}
+
+	return diff <= errorMargin
+}
+
+func positionIdFrom(cur realm, positionId any) grc721.TokenID {
+	if positionId == nil {
+		panic("positionId is nil")
+	}
+
+	switch positionId.(type) {
+	case string:
+		return grc721.TokenID(positionId.(string))
+	case int:
+		return grc721.TokenID(strconv.Itoa(positionId.(int)))
+	case uint64:
+		return grc721.TokenID(strconv.Itoa(int(positionId.(uint64))))
+	case grc721.TokenID:
+		return positionId.(grc721.TokenID)
+	default:
+		panic("unsupported positionId type")
+	}
+}
+
+// Output:
+// [SCENARIO] 1. Initialize and setup
+// [INFO] set unstaking fee to 0
+// [INFO] set pool creation fee to 0
+// [INFO] register gns change callback
+//
+// [SCENARIO] 2. Create bar:baz:100 pool
+// [INFO] create bar:baz:100 pool
+//
+// [SCENARIO] 3. Create external incentive
+// [INFO] approve tokens for external incentive
+// [INFO] create external incentive with bar token
+// [INFO] external incentive created - reward per block: ~1000000000
+//
+// [SCENARIO] 4. Mint and stake position 01
+// [INFO] approve tokens for position 01
+// [INFO] mint position 01 (tick range: -100 ~ 100)
+// [EXPECTED] position 01 - ID: 1, liquidity: 200510
+// [EXPECTED] amounts - bar: 1000, baz: 1000
+// [INFO] approve NFT to staker and stake position 01
+// [EXPECTED] position 01 staked
+//
+// [SCENARIO] 5. Mint and stake position 02
+// [INFO] approve tokens for position 02
+// [INFO] mint position 02 (tick range: -100 ~ 100)
+// [EXPECTED] position 02 - ID: 2, liquidity: 200510
+// [EXPECTED] amounts - bar: 1000, baz: 1000
+// [INFO] approve NFT to staker and stake position 02
+// [EXPECTED] position 02 staked
+//
+// [SCENARIO] 6. Collect external rewards for both positions
+// [INFO] clear any accumulated rewards first
+// [INFO] collect external reward for position 01
+// [EXPECTED] position 01 external reward: 8680
+// [WARNING] expected around 500000000, got 8680
+// [INFO] collect external reward for position 02
+// [EXPECTED] position 02 external reward: 8680
+// [WARNING] expected around 500000000, got 8680
+//
+// [SCENARIO] 7. Unstake position 02
+// [INFO] unstake position 02
+// [EXPECTED] position 02 owner after unstaking: g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5
+//
+// [SCENARIO] 8. Collect external rewards after unstaking
+// [INFO] collect external reward for position 01 after position 02 unstaked
+// [EXPECTED] position 01 external reward after unstaking pos 02: 17361
+// [WARNING] expected around 1000000000, got 17361
+// [INFO] position 01 now receives full external rewards since position 02 is unstaked

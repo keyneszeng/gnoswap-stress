@@ -1,0 +1,322 @@
+// swap with referral system
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"gno.land/p/gnoswap/gnsmath"
+	"chain"
+	"testing"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/gns"
+	"gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	"gno.land/r/gnoswap/referral"
+	"gno.land/r/gnoswap/router"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+	_ "gno.land/r/gnoswap/router/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/gnoland/wugnot"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	poolAddr, _   = access.GetAddress(prabc.ROLE_POOL.String())
+	routerAddr, _ = access.GetAddress(prabc.ROLE_ROUTER.String())
+
+	wugnotPath = "gno.land/r/gnoland/wugnot.wugnot"
+	gnsPath    = "gno.land/r/gnoswap/gns.GNS"
+
+	maxInt64 int64 = 9223372036854775807
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Initialize Setup")
+	initializeSetup(cur)
+
+	// Deposit must be called from main(cur) due to AssertOriginCall frame limit
+	testing.SetRealm(adminRealm)
+	testing.SetOriginSend(chain.Coins{{"ugnot", 100000000000000}})
+	wugnot.Deposit(cross(cur))
+	testing.SetOriginSend(chain.Coins{})
+	println("[INFO] WUGNOT Balance of admin:", wugnot.BalanceOf(adminAddr))
+	println()
+
+	println("[SCENARIO] 2. Create Pool And Mint Position (WUGNOT:GNS:500)")
+	createPool(cur, wugnotPath, gnsPath, 500, 0)
+
+	mintPosition(cur, wugnotPath, gnsPath, 500, -6960, 6960, "100000000", "100000000")
+	println()
+	println("[SCENARIO] 3. First User Swap with Referrer (should register referrer)")
+
+	user1Addr := testutils.TestAddress("user1")
+	referrerAddr := testutils.TestAddress("referrer1")
+
+	// Deposit must be called from main(cur) due to AssertOriginCall frame limit
+	testing.IssueCoins(user1Addr, chain.Coins{{"ugnot", 100000000}})
+	testing.SetRealm(testing.NewUserRealm(user1Addr))
+
+	testing.SetOriginSend(chain.Coins{{"ugnot", 100000000}})
+	wugnot.Deposit(cross(cur))
+
+	testing.SetOriginSend(chain.Coins{})
+	setupUser(cur, user1Addr)
+
+	testing.SetRealm(testing.NewUserRealm(user1Addr))
+	beforeReferral := referral.GetReferral(user1Addr.String())
+	ufmt.Printf("[INFO] User1 referral before swap: '%s'\n", beforeReferral)
+
+	swapWithReferrer(cur, user1Addr, referrerAddr.String())
+
+	testing.SetRealm(testing.NewUserRealm(user1Addr))
+	afterReferral := referral.GetReferral(user1Addr.String())
+	ufmt.Printf("[EXPECTED] User1 referral after first swap: '%s'\n", afterReferral)
+	println()
+
+	println("[SCENARIO] 4. Same User Swap with referral contract address (should delete existing referrer)")
+	swapWithReferrer(cur, user1Addr, referral.ContractAddress())
+
+	testing.SetRealm(testing.NewUserRealm(user1Addr))
+	stillReferral := referral.GetReferral(user1Addr.String())
+	ufmt.Printf("[EXPECTED] User1 referral after swap with empty referrer: '%s'\n", stillReferral)
+	println()
+
+	println("[SCENARIO] 5. Register Referrer Again and Swap with Different Referrer")
+
+	// Register referrer again
+	swapWithReferrer(cur, user1Addr, referrerAddr.String())
+
+	testing.SetRealm(testing.NewUserRealm(user1Addr))
+	reRegisteredReferral := referral.GetReferral(user1Addr.String())
+	ufmt.Printf("[INFO] User1 referral after re-registration: '%s'\n", reRegisteredReferral)
+
+	// Try to change to different referrer (should fail due to rate limit)
+	differentReferrer := testutils.TestAddress("referrer2")
+	swapWithReferrer(cur, user1Addr, differentReferrer.String())
+
+	testing.SetRealm(testing.NewUserRealm(user1Addr))
+	unchangedReferral := referral.GetReferral(user1Addr.String())
+	ufmt.Printf("[EXPECTED] User1 referral after swap with different referrer: '%s'\n", unchangedReferral)
+	println()
+
+	println("[SCENARIO] 6. New User Swap with Referrer (should register new referrer)")
+	user2Addr := testutils.TestAddress("user2")
+	referrer2Addr := testutils.TestAddress("referrer3")
+
+	// Deposit must be called from main(cur) due to AssertOriginCall frame limit
+	testing.IssueCoins(user2Addr, chain.Coins{{"ugnot", 100000000}})
+	testing.SetRealm(testing.NewUserRealm(user2Addr))
+
+	testing.SetOriginSend(chain.Coins{{"ugnot", 100000000}})
+	wugnot.Deposit(cross(cur))
+
+	testing.SetOriginSend(chain.Coins{})
+	setupUser(cur, user2Addr)
+
+	testing.SetRealm(testing.NewUserRealm(user2Addr))
+	beforeUser2Referral := referral.GetReferral(user2Addr.String())
+	ufmt.Printf("[INFO] User2 referral before swap: '%s'\n", beforeUser2Referral)
+
+	swapWithReferrer(cur, user2Addr, referrer2Addr.String())
+
+	testing.SetRealm(testing.NewUserRealm(user2Addr))
+	afterUser2Referral := referral.GetReferral(user2Addr.String())
+	ufmt.Printf("[EXPECTED] User2 referral after swap: '%s'\n", afterUser2Referral)
+	println()
+
+	println("[SCENARIO] 7. Rate Limit Expiration - Re-registration After 24 Hours")
+
+	// Skip 17280 blocks = 24 hours (5 seconds per block)
+	// 24 hours * 60 minutes * 60 seconds / 5 seconds = 17280 blocks
+	testing.SkipHeights(17280)
+	ufmt.Println("[INFO] Skipped 17280 blocks (24 hours)")
+
+	// Now user1 should be able to register a different referrer
+	newReferrerAddr := testutils.TestAddress("referrer4")
+
+	testing.SetRealm(testing.NewUserRealm(user1Addr))
+	beforeSkipReferral := referral.GetReferral(user1Addr.String())
+	ufmt.Printf("[INFO] User1 referral before re-registration: '%s'\n", beforeSkipReferral)
+
+	swapWithReferrer(cur, user1Addr, newReferrerAddr.String())
+
+	testing.SetRealm(testing.NewUserRealm(user1Addr))
+	afterSkipReferral := referral.GetReferral(user1Addr.String())
+	ufmt.Printf("[EXPECTED] User1 referral after 24h and re-registration: '%s'\n", afterSkipReferral)
+	println()
+}
+
+func initializeSetup(cur realm) {
+	testing.SetRealm(adminRealm)
+	pool.SetPoolCreationFee(cross(cur), 0)
+
+	testing.IssueCoins(adminAddr, chain.Coins{{"ugnot", 100000000000000}})
+	testing.IssueCoins(testing.NewCodeRealm("gno.land/r/gnoland/wugnot").Address(), chain.Coins{{"ugnot", 100000000000000}})
+
+	println("[INFO] GNS Balance of admin:", gns.BalanceOf(adminAddr))
+
+	gns.Approve(cross(cur), poolAddr, maxInt64)
+	wugnot.Approve(cross(cur), poolAddr, maxInt64)
+
+	gns.Approve(cross(cur), routerAddr, maxInt64)
+	wugnot.Approve(cross(cur), routerAddr, maxInt64)
+}
+
+func setupUser(cur realm, userAddr address) {
+	// Approve router (Deposit and IssueCoins done in main(cur))
+	testing.SetRealm(testing.NewUserRealm(userAddr))
+	wugnot.Approve(cross(cur), routerAddr, maxInt64)
+	gns.Approve(cross(cur), routerAddr, maxInt64)
+
+	ufmt.Printf("[INFO] User %s setup complete - WUGNOT: %d\n", userAddr.String(), wugnot.BalanceOf(userAddr))
+}
+
+func createPool(cur realm, token0Path string, token1Path string, fee uint32, startTick int32) {
+	testing.SetRealm(adminRealm)
+	pool.CreatePool(
+		cross(cur),
+		token0Path,
+		token1Path,
+		fee,
+		gnsmath.TickMathGetSqrtRatioAtTick(startTick).ToString(),
+	)
+
+	ufmt.Printf("[EXPECTED] created %s:%s:%d pool at tick %d\n", token0Path, token1Path, fee, startTick)
+}
+
+func mintPosition(cur realm, token0Path string, token1Path string, fee uint32, minTick, maxTick int32, amount0 string, amount1 string) {
+	testing.SetRealm(adminRealm)
+
+	ufmt.Println("[INFO] Minting position")
+
+	testing.SetOriginSend(chain.Coins{})
+	positionId, liquidity, amount0, amount1 := pn.Mint(
+		cross(cur),
+		token0Path,
+		token1Path,
+		fee,
+		minTick,
+		maxTick,
+		amount0,
+		amount1,
+		"0",
+		"0",
+		9999999999,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] positionId: %d\n", positionId)
+	ufmt.Printf("[EXPECTED] liquidity: %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] amount0: %s\n", amount0)
+	ufmt.Printf("[EXPECTED] amount1: %s\n", amount1)
+}
+
+func swapWithReferrer(cur realm, userAddr address, referrer string) {
+	testing.SetRealm(testing.NewUserRealm(userAddr))
+
+	ufmt.Printf("[INFO] Swapping with referrer: '%s'\n", referrer)
+
+	beforeWUGNOT := wugnot.BalanceOf(userAddr)
+	beforeGNS := gns.BalanceOf(userAddr)
+
+	testing.SetOriginSend(chain.Coins{})
+	inputAmount, outputAmount := router.ExactInSingleSwapRoute(
+		cross(cur),
+		wugnotPath,
+		gnsPath,
+		"1000000",
+		"gno.land/r/gnoland/wugnot.wugnot:gno.land/r/gnoswap/gns.GNS:500",
+		"100",
+		"0",
+		int64(9999999999),
+		referrer, // referrer parameter
+	)
+
+	afterWUGNOT := wugnot.BalanceOf(userAddr)
+	afterGNS := gns.BalanceOf(userAddr)
+
+	ufmt.Printf("[EXPECTED] inputAmount: %s\n", inputAmount)
+	ufmt.Printf("[EXPECTED] outputAmount: %s\n", outputAmount)
+	ufmt.Printf("[EXPECTED] WUGNOT balance changed: %d\n", afterWUGNOT-beforeWUGNOT)
+	ufmt.Printf("[EXPECTED] GNS balance changed: %d\n", afterGNS-beforeGNS)
+}
+
+// Output:
+// [SCENARIO] 1. Initialize Setup
+// [INFO] GNS Balance of admin: 100000000000000
+// [INFO] WUGNOT Balance of admin: 100000000000000
+//
+// [SCENARIO] 2. Create Pool And Mint Position (WUGNOT:GNS:500)
+// [EXPECTED] created gno.land/r/gnoland/wugnot.wugnot:gno.land/r/gnoswap/gns.GNS:500 pool at tick 0
+// [INFO] Minting position
+// [EXPECTED] positionId: 1
+// [EXPECTED] liquidity: 340264708
+// [EXPECTED] amount0: 100000000
+// [EXPECTED] amount1: 100000000
+//
+// [SCENARIO] 3. First User Swap with Referrer (should register referrer)
+// [INFO] User g1w4ek2u33ta047h6lta047h6lta047h6ldvdwpn setup complete - WUGNOT: 100000000
+// [INFO] User1 referral before swap: ''
+// [INFO] Swapping with referrer: 'g1wfjkvetjwfjhyv2lta047h6lta047h6lf0xcls'
+// [EXPECTED] inputAmount: 1000000
+// [EXPECTED] outputAmount: -995078
+// [EXPECTED] WUGNOT balance changed: -1000000
+// [EXPECTED] GNS balance changed: 995078
+// [EXPECTED] User1 referral after first swap: 'g1wfjkvetjwfjhyv2lta047h6lta047h6lf0xcls'
+//
+// [SCENARIO] 4. Same User Swap with referral contract address (should delete existing referrer)
+// [INFO] Swapping with referrer: 'g1u0p5ld4aq6sk5l26ys27wk8nftj080l3era4wn'
+// [EXPECTED] inputAmount: 1000000
+// [EXPECTED] outputAmount: -989266
+// [EXPECTED] WUGNOT balance changed: -1000000
+// [EXPECTED] GNS balance changed: 989266
+// [EXPECTED] User1 referral after swap with empty referrer: ''
+//
+// [SCENARIO] 5. Register Referrer Again and Swap with Different Referrer
+// [INFO] Swapping with referrer: 'g1wfjkvetjwfjhyv2lta047h6lta047h6lf0xcls'
+// [EXPECTED] inputAmount: 1000000
+// [EXPECTED] outputAmount: -983505
+// [EXPECTED] WUGNOT balance changed: -1000000
+// [EXPECTED] GNS balance changed: 983505
+// [INFO] User1 referral after re-registration: ''
+// [INFO] Swapping with referrer: 'g1wfjkvetjwfjhyvjlta047h6lta047h6l2tdl74'
+// [EXPECTED] inputAmount: 1000000
+// [EXPECTED] outputAmount: -977795
+// [EXPECTED] WUGNOT balance changed: -1000000
+// [EXPECTED] GNS balance changed: 977795
+// [EXPECTED] User1 referral after swap with different referrer: ''
+//
+// [SCENARIO] 6. New User Swap with Referrer (should register new referrer)
+// [INFO] User g1w4ek2u3jta047h6lta047h6lta047h6l9huexc setup complete - WUGNOT: 100000000
+// [INFO] User2 referral before swap: ''
+// [INFO] Swapping with referrer: 'g1wfjkvetjwfjhyv6lta047h6lta047h6ltsn9xk'
+// [EXPECTED] inputAmount: 1000000
+// [EXPECTED] outputAmount: -972133
+// [EXPECTED] WUGNOT balance changed: -1000000
+// [EXPECTED] GNS balance changed: 972133
+// [EXPECTED] User2 referral after swap: 'g1wfjkvetjwfjhyv6lta047h6lta047h6ltsn9xk'
+//
+// [SCENARIO] 7. Rate Limit Expiration - Re-registration After 24 Hours
+// [INFO] Skipped 17280 blocks (24 hours)
+// [INFO] User1 referral before re-registration: ''
+// [INFO] Swapping with referrer: 'g1wfjkvetjwfjhydzlta047h6lta047h6lk48j6m'
+// [EXPECTED] inputAmount: 1000000
+// [EXPECTED] outputAmount: -966521
+// [EXPECTED] WUGNOT balance changed: -1000000
+// [EXPECTED] GNS balance changed: 966521
+// [EXPECTED] User1 referral after 24h and re-registration: 'g1wfjkvetjwfjhydzlta047h6lta047h6lk48j6m'

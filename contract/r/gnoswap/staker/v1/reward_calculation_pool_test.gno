@@ -1,0 +1,1071 @@
+package staker
+
+import (
+	"math"
+	"testing"
+	"time"
+
+	"gno.land/p/gnoswap/consts"
+	i256 "gno.land/p/gnoswap/int256"
+	u256 "gno.land/p/gnoswap/uint256"
+	testutils "gno.land/p/nt/testutils/v0"
+	uassert "gno.land/p/nt/uassert/v0"
+	"gno.land/r/gnoswap/staker"
+	sr "gno.land/r/gnoswap/staker"
+)
+
+// Test NewPools constructor
+func TestNewPools(cur realm, t *testing.T) {
+	pools := NewPools()
+
+	uassert.NotNil(t, pools)
+	uassert.NotNil(t, pools.tree)
+}
+
+// Test Pools Get and set operations
+func TestPoolsGetSet(cur realm, t *testing.T) {
+	tests := []struct {
+		name      string
+		poolPath  string
+		shouldSet bool
+	}{
+		{
+			name:      "set and get pool",
+			poolPath:  "pool1",
+			shouldSet: true,
+		},
+		{
+			name:      "get non-existent pool",
+			poolPath:  "nonexistent",
+			shouldSet: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pools := NewPools()
+			currentTime := time.Now().Unix()
+
+			if tt.shouldSet {
+				pool := sr.NewPool(tt.poolPath, currentTime)
+				pools.set(tt.poolPath, pool)
+
+				retrieved, ok := pools.Get(tt.poolPath)
+				uassert.True(t, ok)
+				uassert.NotNil(t, retrieved)
+				uassert.Equal(t, tt.poolPath, retrieved.PoolPath())
+			} else {
+				_, ok := pools.Get(tt.poolPath)
+				uassert.False(t, ok)
+			}
+		})
+	}
+}
+
+// Test GetPoolOrNil
+func TestGetPoolOrNil(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		poolPath    string
+		shouldExist bool
+	}{
+		{
+			name:        "existing pool returns pool",
+			poolPath:    "existing",
+			shouldExist: true,
+		},
+		{
+			name:        "non-existing pool returns nil",
+			poolPath:    "nonexisting",
+			shouldExist: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pools := NewPools()
+			currentTime := time.Now().Unix()
+
+			// Verify pools is empty initially
+			uassert.Equal(t, 0, pools.tree.Size())
+
+			if tt.shouldExist {
+				pool := sr.NewPool(tt.poolPath, currentTime)
+				pools.set(tt.poolPath, pool)
+			}
+
+			result := pools.GetPoolOrNil(tt.poolPath)
+
+			if tt.shouldExist {
+				uassert.NotNil(t, result)
+			} else {
+				// Use direct nil check instead of uassert.Nil to avoid interface nil issues
+				if result != nil {
+					t.Errorf("Expected nil but got: %#v", result)
+				}
+			}
+		})
+	}
+}
+
+// Test Pools Has operation
+func TestPoolsHas(cur realm, t *testing.T) {
+	tests := []struct {
+		name      string
+		poolPath  string
+		shouldAdd bool
+		expected  bool
+	}{
+		{
+			name:      "has existing pool",
+			poolPath:  "test_pool",
+			shouldAdd: true,
+			expected:  true,
+		},
+		{
+			name:      "has non-existing pool",
+			poolPath:  "missing_pool",
+			shouldAdd: false,
+			expected:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pools := NewPools()
+			currentTime := time.Now().Unix()
+
+			if tt.shouldAdd {
+				pool := sr.NewPool(tt.poolPath, currentTime)
+				pools.set(tt.poolPath, pool)
+			}
+
+			result := pools.Has(tt.poolPath)
+			uassert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// Test NewPoolResolver
+func TestNewPoolResolver(cur realm, t *testing.T) {
+	tests := []struct {
+		name     string
+		poolPath string
+	}{
+		{
+			name:     "create resolver for pool",
+			poolPath: "test_pool",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			currentTime := time.Now().Unix()
+			pool := sr.NewPool(tt.poolPath, currentTime)
+			resolver := NewPoolResolver(pool)
+
+			uassert.NotNil(t, resolver)
+			uassert.NotNil(t, resolver.Pool)
+		})
+	}
+}
+
+// Test IncentivesResolver
+func TestIncentivesResolverFromPool(cur realm, t *testing.T) {
+	tests := []struct {
+		name     string
+		poolPath string
+	}{
+		{
+			name:     "get incentives resolver",
+			poolPath: "test_pool",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			currentTime := time.Now().Unix()
+			pool := sr.NewPool(tt.poolPath, currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			incentivesResolver := poolResolver.IncentivesResolver()
+			uassert.NotNil(t, incentivesResolver)
+		})
+	}
+}
+
+// Test CurrentGlobalRewardRatioAccumulation
+func TestCurrentGlobalRewardRatioAccumulation(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		poolPath    string
+		currentTime int64
+	}{
+		{
+			name:        "get initial accumulation",
+			poolPath:    "test_pool",
+			currentTime: 1000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pool := sr.NewPool(tt.poolPath, tt.currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			timestamp, acc := poolResolver.CurrentGlobalRewardRatioAccumulation(tt.currentTime)
+
+			uassert.NotNil(t, acc)
+			uassert.True(t, timestamp >= 0)
+		})
+	}
+}
+
+// Test CurrentTick
+func TestCurrentTick(cur realm, t *testing.T) {
+	tests := []struct {
+		name                 string
+		poolPath             string
+		setupHistoricalTicks func(poolResolver *PoolResolver)
+		currentTime          int64
+		expectedTick         int32
+		expectedAbort        bool
+		expectedAbortMessage string
+	}{
+		{
+			name:     "get current tick by valid historical ticks",
+			poolPath: "test_pool",
+			setupHistoricalTicks: func(poolResolver *PoolResolver) {
+				historicalTicks := staker.NewUintTree()
+				historicalTicks.Set(1, int32(1))
+				historicalTicks.Set(2, int32(2))
+				historicalTicks.Set(3, int32(3))
+
+				poolResolver.Pool.SetHistoricalTick(historicalTicks)
+			},
+			currentTime:  1000,
+			expectedTick: 3,
+		},
+		{
+			name:     "get current tick by valid historical ticks",
+			poolPath: "test_pool",
+			setupHistoricalTicks: func(poolResolver *PoolResolver) {
+				historicalTicks := staker.NewUintTree()
+				historicalTicks.Set(1, int32(1))
+				historicalTicks.Set(2, int32(2))
+				historicalTicks.Set(3, int32(3))
+				historicalTicks.Set(1001, int32(3))
+
+				poolResolver.Pool.SetHistoricalTick(historicalTicks)
+			},
+			currentTime:  1000,
+			expectedTick: 3,
+		},
+		{
+			name:     "get current tick by invalid historical ticks (int64 type)",
+			poolPath: "test_pool",
+			setupHistoricalTicks: func(poolResolver *PoolResolver) {
+				historicalTicks := staker.NewUintTree()
+				historicalTicks.Set(1, int64(1))
+				historicalTicks.Set(2, int64(2))
+				historicalTicks.Set(3, int64(3))
+
+				poolResolver.Pool.SetHistoricalTick(historicalTicks)
+			},
+			currentTime:          1000,
+			expectedAbort:        true,
+			expectedAbortMessage: "failed to cast value to int32: int64",
+		},
+		{
+			name:     "get current tick by invalid historical ticks (string type)",
+			poolPath: "test_pool",
+			setupHistoricalTicks: func(poolResolver *PoolResolver) {
+				historicalTicks := staker.NewUintTree()
+				historicalTicks.Set(1, "1")
+				historicalTicks.Set(2, "2")
+				historicalTicks.Set(3, "3")
+
+				poolResolver.Pool.SetHistoricalTick(historicalTicks)
+			},
+			currentTime:          1000,
+			expectedTick:         3,
+			expectedAbort:        true,
+			expectedAbortMessage: "failed to cast value to int32: string",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pool := sr.NewPool(tt.poolPath, tt.currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			if tt.setupHistoricalTicks != nil {
+				tt.setupHistoricalTicks(poolResolver)
+			}
+
+			if tt.expectedAbort {
+				uassert.AbortsContains(t, cur, tt.expectedAbortMessage, func() {
+					poolResolver.CurrentTick(tt.currentTime)
+				})
+			} else {
+				tick := poolResolver.CurrentTick(tt.currentTime)
+				uassert.Equal(t, tt.expectedTick, tick)
+			}
+		})
+	}
+}
+
+// Test CurrentStakedLiquidity
+func TestCurrentStakedLiquidity(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		poolPath    string
+		currentTime int64
+	}{
+		{
+			name:        "get initial staked liquidity (should be zero)",
+			poolPath:    "test_pool",
+			currentTime: 1000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pool := sr.NewPool(tt.poolPath, tt.currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			liquidity := poolResolver.CurrentStakedLiquidity(tt.currentTime)
+
+			uassert.NotNil(t, liquidity)
+			uassert.True(t, liquidity.IsZero())
+		})
+	}
+}
+
+// Test CurrentReward
+func TestCurrentRewardPool(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		poolPath    string
+		currentTime int64
+	}{
+		{
+			name:        "get initial reward (should be zero)",
+			poolPath:    "test_pool",
+			currentTime: 1000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pool := sr.NewPool(tt.poolPath, tt.currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			reward := poolResolver.CurrentReward(tt.currentTime)
+			uassert.Equal(t, int64(0), reward)
+		})
+	}
+}
+
+// Test cacheReward
+func TestCacheRewardPool(cur realm, t *testing.T) {
+	tests := []struct {
+		name              string
+		poolPath          string
+		currentTime       int64
+		currentTierReward int64
+	}{
+		{
+			name:              "cache reward with value",
+			poolPath:          "test_pool",
+			currentTime:       1000,
+			currentTierReward: 5000,
+		},
+		{
+			name:              "cache zero reward",
+			poolPath:          "test_pool",
+			currentTime:       2000,
+			currentTierReward: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pool := sr.NewPool(tt.poolPath, tt.currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			poolResolver.cacheReward(tt.currentTime, tt.currentTierReward)
+
+			reward := poolResolver.CurrentReward(tt.currentTime)
+			uassert.Equal(t, tt.currentTierReward, reward)
+		})
+	}
+}
+
+// Test calculateGlobalRewardRatioAccumulation
+func TestCalculateGlobalRewardRatioAccumulation(cur realm, t *testing.T) {
+	tests := []struct {
+		name                   string
+		poolPath               string
+		currentTime            int64
+		currentStakedLiquidity *u256.Uint
+	}{
+		{
+			name:                   "zero liquidity returns same accumulation",
+			poolPath:               "test_pool",
+			currentTime:            1000,
+			currentStakedLiquidity: u256.Zero(),
+		},
+		{
+			name:                   "non-zero liquidity",
+			poolPath:               "test_pool",
+			currentTime:            2000,
+			currentStakedLiquidity: u256.NewUintFromInt64(1000),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pool := sr.NewPool(tt.poolPath, tt.currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			acc := poolResolver.calculateGlobalRewardRatioAccumulation(tt.currentTime, tt.currentStakedLiquidity)
+
+			uassert.NotNil(t, acc)
+		})
+	}
+}
+
+// Test updateGlobalRewardRatioAccumulation
+func TestUpdateGlobalRewardRatioAccumulation(cur realm, t *testing.T) {
+	tests := []struct {
+		name                   string
+		poolPath               string
+		currentTime            int64
+		currentStakedLiquidity *u256.Uint
+	}{
+		{
+			name:                   "update with zero liquidity",
+			poolPath:               "test_pool",
+			currentTime:            1000,
+			currentStakedLiquidity: u256.Zero(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pool := sr.NewPool(tt.poolPath, tt.currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			newAcc := poolResolver.updateGlobalRewardRatioAccumulation(tt.currentTime, tt.currentStakedLiquidity)
+
+			uassert.NotNil(t, newAcc)
+		})
+	}
+}
+
+// Test RewardStateOf
+func TestRewardStateOf(cur realm, t *testing.T) {
+	tests := []struct {
+		name       string
+		poolPath   string
+		numWarmups int
+	}{
+		{
+			name:       "create reward state with single warmup",
+			poolPath:   "test_pool",
+			numWarmups: 1,
+		},
+		{
+			name:       "create reward state with multiple warmups",
+			poolPath:   "test_pool",
+			numWarmups: 4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			currentTime := time.Now().Unix()
+			pool := sr.NewPool(tt.poolPath, currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			warmups := make([]sr.Warmup, tt.numWarmups)
+			for i := 0; i < tt.numWarmups; i++ {
+				warmups[i] = sr.NewWarmup(0, currentTime+int64(i*86400), 30+uint64(i*20))
+			}
+
+			deposit := sr.NewDeposit(
+				testutils.TestAddress("owner"),
+				tt.poolPath,
+				u256.NewUintFromInt64(1000),
+				currentTime,
+				int32(0),
+				int32(100),
+				warmups,
+			)
+
+			rewardState := poolResolver.RewardStateOf(deposit)
+
+			uassert.NotNil(t, rewardState)
+			uassert.Equal(t, tt.numWarmups, len(rewardState.rewards))
+			uassert.Equal(t, tt.numWarmups, len(rewardState.penalties))
+		})
+	}
+}
+
+// Test startUnclaimablePeriod and endUnclaimablePeriod
+func TestUnclaimablePeriod(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		poolPath    string
+		currentTime int64
+	}{
+		{
+			name:        "start and end unclaimable period",
+			poolPath:    "test_pool",
+			currentTime: 1000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pool := sr.NewPool(tt.poolPath, tt.currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			// Start unclaimable period
+			poolResolver.startUnclaimablePeriod(tt.currentTime)
+			uassert.Equal(t, tt.currentTime, poolResolver.Pool.LastUnclaimableTime())
+
+			// End unclaimable period
+			poolResolver.endUnclaimablePeriod(tt.currentTime + 100)
+			uassert.Equal(t, int64(0), poolResolver.Pool.LastUnclaimableTime())
+		})
+	}
+}
+
+// Test processUnclaimableReward
+func TestProcessUnclaimableReward(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		poolPath    string
+		currentTime int64
+	}{
+		{
+			name:        "process unclaimable reward",
+			poolPath:    "test_pool",
+			currentTime: 1000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pool := sr.NewPool(tt.poolPath, tt.currentTime)
+			poolResolver := NewPoolResolver(pool)
+			pools := NewPools()
+			pools.set(tt.poolPath, pool)
+
+			// Set up some unclaimable accumulation
+			poolResolver.Pool.SetUnclaimableAcc(500)
+
+			unclaimable := poolResolver.processUnclaimableReward(tt.currentTime)
+
+			uassert.True(t, unclaimable >= 0)
+			uassert.Equal(t, int64(0), poolResolver.Pool.UnclaimableAcc())
+		})
+	}
+}
+
+// Test IsExternallyIncentivizedPool
+func TestIsExternallyIncentivizedPool(cur realm, t *testing.T) {
+	tests := []struct {
+		name     string
+		poolPath string
+	}{
+		{
+			name:     "pool with no external incentives",
+			poolPath: "test_pool",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			currentTime := time.Now().Unix()
+			pool := sr.NewPool(tt.poolPath, currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			// Should be false initially
+			result := poolResolver.IsExternallyIncentivizedPool()
+			uassert.False(t, result)
+		})
+	}
+}
+
+// Test GetOrNewTick
+func TestGetOrNewTick(cur realm, t *testing.T) {
+	tests := []struct {
+		name     string
+		poolPath string
+		tickId   int32
+	}{
+		{
+			name:     "get or new tick",
+			poolPath: "test_pool",
+			tickId:   0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			currentTime := time.Now().Unix()
+			pool := sr.NewPool(tt.poolPath, currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			tickResolver := NewTickResolver(poolResolver.GetOrNewTick(tt.tickId))
+			uassert.NotNil(t, tickResolver)
+			// Does not insert a missing tick.
+			uassert.False(t, pool.Ticks().Has(tt.tickId))
+		})
+	}
+}
+
+// Test RewardState applyWarmup
+func TestRewardStateApplyWarmup(cur realm, t *testing.T) {
+	tests := []struct {
+		name              string
+		rewards           []int64
+		warmupRatios      []uint64
+		expectedRewards   []int64
+		expectedPenalties []int64
+	}{
+		{
+			name:              "apply 100% warmup",
+			rewards:           []int64{1000},
+			warmupRatios:      []uint64{100},
+			expectedRewards:   []int64{1000},
+			expectedPenalties: []int64{0},
+		},
+		{
+			name:              "apply 50% warmup",
+			rewards:           []int64{1000},
+			warmupRatios:      []uint64{50},
+			expectedRewards:   []int64{500},
+			expectedPenalties: []int64{500},
+		},
+		{
+			name:              "apply 30% warmup",
+			rewards:           []int64{1000},
+			warmupRatios:      []uint64{30},
+			expectedRewards:   []int64{300},
+			expectedPenalties: []int64{700},
+		},
+		{
+			name:              "apply 100% warmup without intermediate overflow",
+			rewards:           []int64{math.MaxInt64},
+			warmupRatios:      []uint64{100},
+			expectedRewards:   []int64{math.MaxInt64},
+			expectedPenalties: []int64{0},
+		},
+		{
+			name:              "apply 50% warmup without intermediate overflow",
+			rewards:           []int64{math.MaxInt64},
+			warmupRatios:      []uint64{50},
+			expectedRewards:   []int64{math.MaxInt64 / 2},
+			expectedPenalties: []int64{math.MaxInt64 - math.MaxInt64/2},
+		},
+		{
+			name:              "apply 100% warmup above int64 multiplication threshold",
+			rewards:           []int64{math.MaxInt64/100 + 1},
+			warmupRatios:      []uint64{100},
+			expectedRewards:   []int64{math.MaxInt64/100 + 1},
+			expectedPenalties: []int64{0},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			currentTime := time.Now().Unix()
+			pool := sr.NewPool("test_pool", currentTime)
+			poolResolver := NewPoolResolver(pool)
+
+			warmups := make([]sr.Warmup, len(tt.warmupRatios))
+			for i, ratio := range tt.warmupRatios {
+				warmups[i] = sr.NewWarmup(0, currentTime+int64(i*86400), ratio)
+			}
+
+			deposit := sr.NewDeposit(
+				testutils.TestAddress("owner"),
+				"test_pool",
+				u256.NewUintFromInt64(1000),
+				currentTime,
+				int32(0),
+				int32(100),
+				warmups,
+			)
+
+			rewardState := poolResolver.RewardStateOf(deposit)
+			rewardState.rewards = tt.rewards
+
+			rewardState.applyWarmup()
+
+			for i := range tt.expectedRewards {
+				uassert.Equal(t, tt.expectedRewards[i], rewardState.rewards[i])
+				uassert.Equal(t, tt.expectedPenalties[i], rewardState.penalties[i])
+			}
+		})
+	}
+}
+
+// Test RewardState reset
+func TestRewardStateReset(cur realm, t *testing.T) {
+	currentTime := time.Now().Unix()
+	pool := sr.NewPool("test_pool", currentTime)
+	poolResolver := NewPoolResolver(pool)
+
+	warmups := []sr.Warmup{
+		sr.NewWarmup(0, currentTime+86400, 30),
+		sr.NewWarmup(0, currentTime+172800, 50),
+		sr.NewWarmup(0, currentTime+259200, 70),
+	}
+
+	deposit := sr.NewDeposit(
+		testutils.TestAddress("owner"),
+		"test_pool",
+		u256.NewUint(1000),
+		currentTime,
+		int32(-100),
+		int32(100),
+		warmups,
+	)
+
+	rewardState := poolResolver.RewardStateOf(deposit)
+
+	// Set some values
+	rewardState.rewards[0] = 1000
+	rewardState.rewards[1] = 2000
+	rewardState.rewards[2] = 3000
+	rewardState.penalties[0] = 100
+	rewardState.penalties[1] = 200
+	rewardState.penalties[2] = 300
+
+	// Reset
+	rewardState.reset()
+
+	// Verify all values are zero
+	for i := range rewardState.rewards {
+		uassert.Equal(t, int64(0), rewardState.rewards[i])
+		uassert.Equal(t, int64(0), rewardState.penalties[i])
+	}
+}
+
+func TestRewardStateReset_MultipleResets(cur realm, t *testing.T) {
+	currentTime := time.Now().Unix()
+	pool := sr.NewPool("test_pool", currentTime)
+	poolResolver := NewPoolResolver(pool)
+
+	warmups := []sr.Warmup{
+		sr.NewWarmup(0, currentTime+86400, 50),
+	}
+
+	deposit := sr.NewDeposit(
+		testutils.TestAddress("owner"),
+		"test_pool",
+		u256.NewUint(1000),
+		currentTime,
+		int32(-100),
+		int32(100),
+		warmups,
+	)
+
+	rewardState := poolResolver.RewardStateOf(deposit)
+
+	// First round: set values and reset
+	rewardState.rewards[0] = 5000
+	rewardState.penalties[0] = 500
+	rewardState.reset()
+
+	uassert.Equal(t, int64(0), rewardState.rewards[0])
+	uassert.Equal(t, int64(0), rewardState.penalties[0])
+
+	// Second round: set different values and reset
+	rewardState.rewards[0] = 9999
+	rewardState.penalties[0] = 1111
+	rewardState.reset()
+
+	uassert.Equal(t, int64(0), rewardState.rewards[0])
+	uassert.Equal(t, int64(0), rewardState.penalties[0])
+}
+
+func TestRewardStateReset_PreservesSliceLength(cur realm, t *testing.T) {
+	currentTime := time.Now().Unix()
+	pool := sr.NewPool("test_pool", currentTime)
+	poolResolver := NewPoolResolver(pool)
+
+	warmups := []sr.Warmup{
+		sr.NewWarmup(0, currentTime+86400, 30),
+		sr.NewWarmup(0, currentTime+172800, 50),
+		sr.NewWarmup(0, currentTime+259200, 70),
+		sr.NewWarmup(0, currentTime+345600, 100),
+	}
+
+	deposit := sr.NewDeposit(
+		testutils.TestAddress("owner"),
+		"test_pool",
+		u256.NewUint(1000),
+		currentTime,
+		int32(-100),
+		int32(100),
+		warmups,
+	)
+
+	rewardState := poolResolver.RewardStateOf(deposit)
+	originalLen := len(rewardState.rewards)
+
+	rewardState.reset()
+
+	// Length should be preserved
+	uassert.Equal(t, originalLen, len(rewardState.rewards))
+	uassert.Equal(t, originalLen, len(rewardState.penalties))
+}
+
+func TestModifyDeposit_StoresHistoricalTickOnlyOnChange(cur realm, t *testing.T) {
+	tests := []struct {
+		name string
+		ops  []struct {
+			at   int64
+			tick int32
+		}
+		expectedSize    int
+		expectedHasKeys []int64
+	}{
+		{
+			// case: modifyDeposit is never called
+			// expect: HistoricalTick remains empty.
+			name:            "no operation keeps history empty",
+			ops:             nil,
+			expectedSize:    0,
+			expectedHasKeys: nil,
+		},
+		{
+			// case: same tick then changed tick sequence
+			// expect: entries only at change points.
+			name: "store only when tick changes",
+			ops: []struct {
+				at   int64
+				tick int32
+			}{
+				{at: 1001, tick: 10},
+				{at: 1002, tick: 10},
+				{at: 1003, tick: 11},
+			},
+			expectedSize:    2,
+			expectedHasKeys: []int64{1001, 1003},
+		},
+		{
+			// case: identical tick repeated across timestamps
+			// expect: first timestamp only is stored.
+			name: "same tick repeated stores only once",
+			ops: []struct {
+				at   int64
+				tick int32
+			}{
+				{at: 1001, tick: -100},
+				{at: 1002, tick: -100},
+				{at: 1003, tick: -100},
+			},
+			expectedSize:    1,
+			expectedHasKeys: []int64{1001},
+		},
+		{
+			// case: tick alternates every operation
+			// expect: each operation stores a new historical tick.
+			name: "alternating ticks stores each changed point",
+			ops: []struct {
+				at   int64
+				tick int32
+			}{
+				{at: 1001, tick: 1},
+				{at: 1002, tick: 2},
+				{at: 1003, tick: 1},
+				{at: 1004, tick: 2},
+			},
+			expectedSize:    4,
+			expectedHasKeys: []int64{1001, 1002, 1003, 1004},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			currentTime := int64(1000)
+			pool := sr.NewPool("test_pool", currentTime)
+			poolResolver := NewPoolResolver(pool)
+			zeroDelta := i256.Zero()
+
+			for _, op := range tt.ops {
+				poolResolver.modifyDeposit(zeroDelta, op.at, op.tick)
+			}
+
+			uassert.Equal(t, tt.expectedSize, pool.HistoricalTick().Size())
+			for _, key := range tt.expectedHasKeys {
+				uassert.True(t, pool.HistoricalTick().Has(key))
+			}
+		})
+	}
+}
+
+func TestHistoricalTickDensity_DoesNotChangeRewardCalculation(cur realm, t *testing.T) {
+	tests := []struct {
+		name            string
+		startTime       int64
+		endTime         int64
+		rewardPerSecond int64
+		liquidity       int64
+		compactHistory  []struct {
+			at   int64
+			tick int32
+		}
+		denseHistory []struct {
+			at   int64
+			tick int32
+		}
+		globalAccAtStartMult int64
+		globalAccAtEndMult   int64
+		sampleTimes          []int64
+	}{
+		{
+			name:            "dense unchanged tick history and compact history produce same result", // Case: old style (append even unchanged) vs new style (append on change only); Expect: CurrentTick and internal reward are identical.
+			startTime:       1000,
+			endTime:         1010,
+			rewardPerSecond: 5,
+			liquidity:       1000,
+			compactHistory: []struct {
+				at   int64
+				tick int32
+			}{
+				{at: 1000, tick: 5},
+				{at: 1005, tick: 7},
+			},
+			denseHistory: []struct {
+				at   int64
+				tick int32
+			}{
+				{at: 1000, tick: 5},
+				{at: 1001, tick: 5},
+				{at: 1002, tick: 5},
+				{at: 1003, tick: 5},
+				{at: 1004, tick: 5},
+				{at: 1005, tick: 7},
+				{at: 1006, tick: 7},
+				{at: 1007, tick: 7},
+				{at: 1008, tick: 7},
+				{at: 1009, tick: 7},
+			},
+			globalAccAtStartMult: 0,
+			globalAccAtEndMult:   10,
+			sampleTimes:          []int64{1000, 1001, 1004, 1005, 1009, 1010},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			makePoolWithHistory := func(poolPath string, history []struct {
+				at   int64
+				tick int32
+			}) *PoolResolver {
+				pool := sr.NewPool(poolPath, tt.startTime)
+				resolver := NewPoolResolver(pool)
+
+				// Keep reward constant in [start, end).
+				pool.SetRewardCacheAt(tt.startTime, tt.rewardPerSecond)
+
+				// Build deterministic global accumulation snapshots.
+				startAcc := u256.Zero().Mul(u256.NewUintFromInt64(tt.globalAccAtStartMult), consts.Q128())
+				endAcc := u256.Zero().Mul(u256.NewUintFromInt64(tt.globalAccAtEndMult), consts.Q128())
+				pool.SetGlobalRewardRatioAccumulationAt(tt.startTime, startAcc.ToString())
+				pool.SetGlobalRewardRatioAccumulationAt(tt.endTime, endAcc.ToString())
+				for _, h := range history {
+					pool.SetHistoricalTickAt(h.at, h.tick)
+				}
+
+				return resolver
+			}
+
+			compactResolver := makePoolWithHistory("pool_compact", tt.compactHistory)
+			denseResolver := makePoolWithHistory("pool_dense", tt.denseHistory)
+
+			// 1) CurrentTick equivalence across sampled timestamps.
+			for _, ts := range tt.sampleTimes {
+				uassert.Equal(t, compactResolver.CurrentTick(ts), denseResolver.CurrentTick(ts))
+			}
+
+			deposit := sr.NewDeposit(
+				testutils.TestAddress("owner"),
+				"pool_compact",
+				u256.NewUintFromInt64(tt.liquidity),
+				tt.startTime,
+				int32(-10),
+				int32(10),
+				[]sr.Warmup{
+					sr.NewWarmup(0, tt.endTime+1000, 100),
+				},
+			)
+
+			// 2) Reward calculation equivalence.
+			// The per-second rate is constant across the window; only the historical tick density differs.
+			segments := []internalRewardSegment{{start: tt.startTime, end: tt.endTime, rewardPerSecond: tt.rewardPerSecond}}
+			compactRewards, compactPenalties := compactResolver.RewardStateOf(deposit).calculateInternalReward(segments)
+			denseRewards, densePenalties := denseResolver.RewardStateOf(deposit).calculateInternalReward(segments)
+
+			uassert.Equal(t, len(compactRewards), len(denseRewards))
+			for i := range compactRewards {
+				uassert.Equal(t, compactRewards[i], denseRewards[i])
+			}
+			uassert.Equal(t, len(compactPenalties), len(densePenalties))
+			for i := range compactPenalties {
+				uassert.Equal(t, compactPenalties[i], densePenalties[i])
+			}
+		})
+	}
+}
+
+// Test Pools IterateAll
+func TestPoolsIterateAll(cur realm, t *testing.T) {
+	tests := []struct {
+		name     string
+		numPools int
+	}{
+		{
+			name:     "iterate over zero pools",
+			numPools: 0,
+		},
+		{
+			name:     "iterate over single pool",
+			numPools: 1,
+		},
+		{
+			name:     "iterate over multiple pools",
+			numPools: 5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			pools := NewPools()
+			currentTime := time.Now().Unix()
+
+			for i := 0; i < tt.numPools; i++ {
+				poolPath := "pool_" + string(rune('A'+i))
+				pool := sr.NewPool(poolPath, currentTime)
+				pools.set(poolPath, pool)
+			}
+
+			count := 0
+			pools.IterateAll(func(key string, pool *sr.Pool) bool {
+				count++
+				uassert.NotNil(t, pool)
+				return false
+			})
+
+			uassert.Equal(t, tt.numPools, count)
+		})
+	}
+}

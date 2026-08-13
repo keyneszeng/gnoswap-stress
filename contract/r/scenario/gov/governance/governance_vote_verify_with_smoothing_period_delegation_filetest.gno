@@ -1,0 +1,339 @@
+// Governance vote verification with delegation changes during smoothing period
+// This test verifies that:
+// 1. Delegation within smoothing period does NOT grant voting power for current proposals
+// 2. Only delegations made BEFORE the snapshot time are counted
+// 3. Snapshot time = proposal creation time - smoothing period
+// 4. Late delegations (mid-period) cannot vote on proposals created after the full period
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"chain/runtime"
+	"testing"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	uassert "gno.land/p/nt/uassert/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/protocol_fee"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+
+	"gno.land/r/gnoswap/access"
+
+	gs "gno.land/r/gnoswap/gov/staker"
+	_ "gno.land/r/gnoswap/gov/staker/v1"
+
+	"gno.land/r/gnoswap/gov/governance"
+	_ "gno.land/r/gnoswap/gov/governance/v1"
+
+	"gno.land/r/gnoswap/gov/xgns"
+
+	"gno.land/r/gnoswap/gns"
+)
+
+var (
+	t *testing.T
+
+	adminAddr             = access.MustGetAddress(prbac.ROLE_ADMIN.String())
+	user1Addr             = testutils.TestAddress("user1")
+	user2Addr             = testutils.TestAddress("user2")
+	user3Addr             = testutils.TestAddress("user3")
+	govStakerAddr         = access.MustGetAddress(prbac.ROLE_GOV_STAKER.String())
+	voter1Addr            = testutils.TestAddress("voter1")
+	voter2Addr            = testutils.TestAddress("voter2")
+	currentBlockTime      = int64(5)
+	proposalQuorumWeights map[int64]int64
+)
+
+func main(cur realm) {
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+	config := governance.GetLatestConfig()
+	proposalQuorumWeights = make(map[int64]int64)
+
+	// Calculate timing for delegation changes within smoothing period
+	smoothingPeriodBlocks := int64(config.VotingWeightSmoothingDuration) / currentBlockTime
+
+	println("[SCENARIO] 1. Initial delegation to voter1")
+	initialDelegation(cur)
+	println()
+
+	println("[SCENARIO] 2. Skip blocks 100")
+	testing.SkipHeights(100)
+	ufmt.Printf("[INFO] current height: %d\n", runtime.ChainHeight())
+	println()
+
+	println("[SCENARIO] 3. Additional delegation to voter2 (mid-period)")
+	midPeriodDelegation(cur)
+	println()
+
+	println("[SCENARIO] 4. Skip remaining smoothing period - 1 block before applying voting weight snapshot")
+	testing.SkipHeights(smoothingPeriodBlocks - 1)
+	ufmt.Printf("[INFO] current height: %d\n", runtime.ChainHeight())
+	println()
+
+	println("[SCENARIO] 5. Check current xGNS balances")
+	checkCurrentXgnsBalance(cur)
+	println()
+
+	println("[SCENARIO] 6. Propose Text - ProposalID: 1 (voter2 has no voting weight)")
+	proposalId1 := proposeText(cur, user1Addr)
+	println()
+
+	println("[SCENARIO] 7. Skip 1 block to apply mid delegation voting weight snapshot")
+	testing.SkipHeights(1)
+	ufmt.Printf("[INFO] current height: %d\n", runtime.ChainHeight())
+	println()
+
+	println("[SCENARIO] 8. Propose Text - ProposalID: 2 (voter2 has voting weight)")
+	proposalId2 := proposeText(cur, user2Addr)
+	println()
+
+	println("[SCENARIO] 9. Skip 1 block to apply after delegation voting weight snapshot")
+	testing.SkipHeights(1)
+	ufmt.Printf("[INFO] current height: %d\n", runtime.ChainHeight())
+	println()
+
+	println("[SCENARIO] 10. Propose Text - ProposalID: 3 (voter2 has voting weight)")
+	proposalId3 := proposeText(cur, user3Addr)
+
+	println("[SCENARIO] 11. Skip voting start delay")
+	testing.SkipHeights(int64(config.VotingStartDelay) / currentBlockTime)
+	ufmt.Printf("[INFO] current height: %d\n", runtime.ChainHeight())
+	println()
+
+	println("[SCENARIO] 12. Both voters vote - ProposalID: 1 (voter1: yes, voter2: no)")
+	voteProposals(cur, proposalId1, true)
+	println()
+
+	println("[SCENARIO] 13. Verify voting weights - ProposalID: 1")
+	verifyVotingWeight(cur, proposalId1, true)
+	println()
+
+	println("[SCENARIO] 14. Both voters vote - ProposalID: 2 (voter1: yes, voter2: no)")
+	voteProposals(cur, proposalId2, true)
+	println()
+
+	println("[SCENARIO] 15. Verify voting weights - ProposalID: 2")
+	verifyVotingWeight(cur, proposalId2, true)
+	println()
+
+	println("[SCENARIO] 16. Both voters vote - ProposalID: 3 (voter1: yes, voter2: no)")
+	voteProposals(cur, proposalId3, true)
+	println()
+
+	println("[SCENARIO] 17. Verify voting weights - ProposalID: 3")
+	verifyVotingWeight(cur, proposalId3, true)
+	println()
+}
+
+func initialDelegation(cur realm) {
+	initialAmount := int64(3_000_000_000)
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+
+	gns.Approve(cross(cur), govStakerAddr, initialAmount)
+	gs.Delegate(cross(cur), voter1Addr, initialAmount, "")
+
+	voter1Xgns := xgns.BalanceOf(voter1Addr)
+	totalXgns := xgns.TotalSupply()
+
+	ufmt.Printf("[INFO] Delegated %d GNS to voter1\n", initialAmount)
+	ufmt.Printf("[INFO] Voter1 xGNS balance: %d\n", voter1Xgns)
+	ufmt.Printf("[INFO] Total xGNS supply: %d\n", totalXgns)
+}
+
+func midPeriodDelegation(cur realm) {
+	additionalAmount := int64(2_000_000_000)
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+
+	gns.Approve(cross(cur), govStakerAddr, additionalAmount)
+	gs.Delegate(cross(cur), voter2Addr, additionalAmount, "")
+
+	voter2Xgns := xgns.BalanceOf(voter2Addr)
+	totalXgns := xgns.TotalSupply()
+
+	ufmt.Printf("[INFO] Delegated %d GNS to voter2 (mid-period)\n", additionalAmount)
+	ufmt.Printf("[INFO] Voter2 xGNS balance: %d\n", voter2Xgns)
+	ufmt.Printf("[INFO] Total xGNS supply: %d\n", totalXgns)
+}
+
+func checkCurrentXgnsBalance(cur realm) {
+	voter1Xgns := xgns.BalanceOf(voter1Addr)
+	voter2Xgns := xgns.BalanceOf(voter2Addr)
+	totalXgns := xgns.TotalSupply()
+
+	ufmt.Printf("[INFO] Voter1 xGNS balance: %d\n", voter1Xgns)
+	ufmt.Printf("[INFO] Voter2 xGNS balance: %d\n", voter2Xgns)
+	ufmt.Printf("[INFO] Total xGNS supply: %d\n", totalXgns)
+}
+
+func prepareProposalCreator(cur realm, proposerAddr address) {
+	amount := governance.GetLatestConfig().ProposalCreationThreshold
+
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+	gns.Transfer(cross(cur), proposerAddr, amount)
+
+	testing.SetRealm(testing.NewUserRealm(proposerAddr))
+	gns.Approve(cross(cur), govStakerAddr, amount)
+	gs.Delegate(cross(cur), proposerAddr, amount, "")
+}
+
+func proposeText(cur realm, proposerAddr address) int64 {
+	prepareProposalCreator(cur, proposerAddr)
+
+	testing.SetRealm(testing.NewUserRealm(proposerAddr))
+	proposalId := governance.ProposeText(cross(cur), "test_title", "test_description")
+	quorumAmount, _ := governance.GetQuorumAmountByProposalId(proposalId)
+	quorumWeight := xgns.TotalSupply()
+	expectedQuorumAmount := quorumWeight * governance.GetLatestConfig().Quorum / 100
+	proposalQuorumWeights[proposalId] = quorumWeight
+
+	uassert.Equal(t, expectedQuorumAmount, quorumAmount)
+	ufmt.Printf("[INFO] Created proposal ID: %d\n", proposalId)
+	ufmt.Printf("[INFO] Snapshot captures current delegation state\n")
+	ufmt.Printf("[EXPECTED] Quorum weight: %d, quorum amount: %d\n", quorumWeight, quorumAmount)
+	return proposalId
+}
+
+func voteProposals(cur realm, proposalId int64, hasVoter2VotingWeight bool) {
+	// Voter1 votes YES
+	testing.SetRealm(testing.NewUserRealm(voter1Addr))
+	governance.Vote(cross(cur), proposalId, true)
+	ufmt.Printf("[INFO] Voter1 voted YES\n")
+
+	if hasVoter2VotingWeight {
+		testing.SetRealm(testing.NewUserRealm(voter2Addr))
+		governance.Vote(cross(cur), proposalId, false)
+		ufmt.Printf("[INFO] Voter2 voted NO\n")
+	} else {
+		uassert.AbortsContains(t, cur, "[GNOSWAP-GOVERNANCE-005] not enough voting power", func() {
+			testing.SetRealm(testing.NewUserRealm(voter2Addr))
+			governance.Vote(cross(cur), proposalId, false)
+		})
+		ufmt.Printf("[INFO] Voter2 cannot vote - delegated AFTER proposal snapshot time\n")
+	}
+
+	state, _ := governance.GetProposalStatusByProposalId(proposalId)
+	ufmt.Printf("[INFO] Proposal state: %s\n", state)
+}
+
+func verifyVotingWeight(cur realm, proposalId int64, hasVoter2VotingWeight bool) {
+	// Get vote weights
+	voter1Weight, _ := governance.GetVoteWeight(proposalId, voter1Addr)
+	voter2Weight := int64(0)
+
+	if hasVoter2VotingWeight {
+		voter2Weight, _ = governance.GetVoteWeight(proposalId, voter2Addr)
+	} else {
+		// GetVoteWeight returns error instead of panicking for non-existent voting info
+		_, err := governance.GetVoteWeight(proposalId, voter2Addr)
+		uassert.Error(t, err, "voter2 should have no voting weight")
+
+		ufmt.Printf("[INFO] Voter2 cannot vote - delegated AFTER proposal snapshot time\n")
+	}
+
+	// Get proposal totals
+	yeaWeight, _ := governance.GetYeaByProposalId(proposalId)
+	nayWeight, _ := governance.GetNayByProposalId(proposalId)
+	quorumAmount, _ := governance.GetQuorumAmountByProposalId(proposalId)
+	quorumWeight := proposalQuorumWeights[proposalId]
+	expectedQuorumAmount := quorumWeight * governance.GetLatestConfig().Quorum / 100
+	uassert.Equal(t, expectedQuorumAmount, quorumAmount)
+
+	// Get xGNS balances
+	voter1Xgns := xgns.BalanceOf(voter1Addr)
+	voter2Xgns := xgns.BalanceOf(voter2Addr)
+
+	ufmt.Printf("[EXPECTED] Voter1: vote weight=%d, xGNS=%d, match=%t\n",
+		voter1Weight, voter1Xgns, voter1Weight == voter1Xgns)
+	ufmt.Printf("[EXPECTED] Voter2: vote weight=%d, xGNS=%d, match=%t\n",
+		voter2Weight, voter2Xgns, voter2Weight == voter2Xgns)
+	ufmt.Printf("[EXPECTED] Quorum amount: %d (xGNS supply %d * quorum 50%%)\n", quorumAmount, quorumWeight)
+	ufmt.Printf("[EXPECTED] Yea weight: %d (voter1)\n", yeaWeight)
+	ufmt.Printf("[EXPECTED] Nay weight: %d (voter2)\n", nayWeight)
+}
+
+// Output:
+// [SCENARIO] 1. Initial delegation to voter1
+// [INFO] Delegated 3000000000 GNS to voter1
+// [INFO] Voter1 xGNS balance: 0
+// [INFO] Total xGNS supply: 3000000000
+//
+// [SCENARIO] 2. Skip blocks 100
+// [INFO] current height: 223
+//
+// [SCENARIO] 3. Additional delegation to voter2 (mid-period)
+// [INFO] Delegated 2000000000 GNS to voter2 (mid-period)
+// [INFO] Voter2 xGNS balance: 0
+// [INFO] Total xGNS supply: 5000000000
+//
+// [SCENARIO] 4. Skip remaining smoothing period - 1 block before applying voting weight snapshot
+// [INFO] current height: 17502
+//
+// [SCENARIO] 5. Check current xGNS balances
+// [INFO] Voter1 xGNS balance: 0
+// [INFO] Voter2 xGNS balance: 0
+// [INFO] Total xGNS supply: 5000000000
+//
+// [SCENARIO] 6. Propose Text - ProposalID: 1 (voter2 has no voting weight)
+// [INFO] Created proposal ID: 1
+// [INFO] Snapshot captures current delegation state
+// [EXPECTED] Quorum weight: 6000000000, quorum amount: 3000000000
+//
+// [SCENARIO] 7. Skip 1 block to apply mid delegation voting weight snapshot
+// [INFO] current height: 17503
+//
+// [SCENARIO] 8. Propose Text - ProposalID: 2 (voter2 has voting weight)
+// [INFO] Created proposal ID: 2
+// [INFO] Snapshot captures current delegation state
+// [EXPECTED] Quorum weight: 7000000000, quorum amount: 3500000000
+//
+// [SCENARIO] 9. Skip 1 block to apply after delegation voting weight snapshot
+// [INFO] current height: 17504
+//
+// [SCENARIO] 10. Propose Text - ProposalID: 3 (voter2 has voting weight)
+// [INFO] Created proposal ID: 3
+// [INFO] Snapshot captures current delegation state
+// [EXPECTED] Quorum weight: 8000000000, quorum amount: 4000000000
+// [SCENARIO] 11. Skip voting start delay
+// [INFO] current height: 34784
+//
+// [SCENARIO] 12. Both voters vote - ProposalID: 1 (voter1: yes, voter2: no)
+// [INFO] Voter1 voted YES
+// [INFO] Voter2 voted NO
+// [INFO] Proposal state: active
+//
+// [SCENARIO] 13. Verify voting weights - ProposalID: 1
+// [EXPECTED] Voter1: vote weight=3000000000, xGNS=0, match=false
+// [EXPECTED] Voter2: vote weight=1000000000, xGNS=0, match=false
+// [EXPECTED] Quorum amount: 3000000000 (xGNS supply 6000000000 * quorum 50%)
+// [EXPECTED] Yea weight: 3000000000 (voter1)
+// [EXPECTED] Nay weight: 1000000000 (voter2)
+//
+// [SCENARIO] 14. Both voters vote - ProposalID: 2 (voter1: yes, voter2: no)
+// [INFO] Voter1 voted YES
+// [INFO] Voter2 voted NO
+// [INFO] Proposal state: active
+//
+// [SCENARIO] 15. Verify voting weights - ProposalID: 2
+// [EXPECTED] Voter1: vote weight=3000000000, xGNS=0, match=false
+// [EXPECTED] Voter2: vote weight=2000000000, xGNS=0, match=false
+// [EXPECTED] Quorum amount: 3500000000 (xGNS supply 7000000000 * quorum 50%)
+// [EXPECTED] Yea weight: 3000000000 (voter1)
+// [EXPECTED] Nay weight: 2000000000 (voter2)
+//
+// [SCENARIO] 16. Both voters vote - ProposalID: 3 (voter1: yes, voter2: no)
+// [INFO] Voter1 voted YES
+// [INFO] Voter2 voted NO
+// [INFO] Proposal state: active
+//
+// [SCENARIO] 17. Verify voting weights - ProposalID: 3
+// [EXPECTED] Voter1: vote weight=3000000000, xGNS=0, match=false
+// [EXPECTED] Voter2: vote weight=2000000000, xGNS=0, match=false
+// [EXPECTED] Quorum amount: 4000000000 (xGNS supply 8000000000 * quorum 50%)
+// [EXPECTED] Yea weight: 3000000000 (voter1)
+// [EXPECTED] Nay weight: 2000000000 (voter2)

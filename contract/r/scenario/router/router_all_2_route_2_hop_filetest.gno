@@ -1,0 +1,324 @@
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"testing"
+	"time"
+
+	"gno.land/r/gnoswap/access"
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	"gno.land/r/gnoswap/router"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/gnoswap/gns"
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/baz"
+	"gno.land/r/onbloc/qux"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	poolAddr, _ = access.GetAddress(prabc.ROLE_POOL.String())
+
+	routerAddr, _ = access.GetAddress(prabc.ROLE_ROUTER.String())
+
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	bazPath = "gno.land/r/onbloc/baz.BAZ"
+	quxPath = "gno.land/r/onbloc/qux.QUX"
+
+	max_timeout int64 = 9999999999
+	maxApprove  int64 = 9223372036854775806
+)
+
+const (
+	FEE_MEDIUM uint32 = 3000
+)
+
+func main(cur realm) {
+	println("[SCENARIO] #2 Route 2 Hop Test")
+	println("[INFO] Starting scenario: Multi-hop routing with 2 routes and 2 hops")
+
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Setting up pools and positions")
+	// create pool
+	gns.Approve(cross(cur), poolAddr, pl.GetPoolCreationFee()*2)
+
+	println("[INFO] Creating bar-baz pool (fee: 500)")
+	pl.CreatePool(cross(cur), barPath, bazPath, uint32(500), "130621891405341611593710811006") // tick =  10_000, ratio = 2.71814592682522526700950038502924144268035888671875
+	println("[INFO] Creating baz-qux pool (fee: 500)")
+	pl.CreatePool(cross(cur), bazPath, quxPath, uint32(500), "130621891405341611593710811006") // tick =  10_000, ratio = 2.71814592682522526700950038502924144268035888671875
+
+	println("[INFO] Approving tokens for pool operations")
+	bar.Approve(cross(cur), poolAddr, maxApprove)
+	baz.Approve(cross(cur), poolAddr, maxApprove)
+	qux.Approve(cross(cur), poolAddr, maxApprove)
+
+	println("[INFO] Minting positions in bar-baz pool")
+	pn.Mint(cross(cur), barPath, bazPath, uint32(500), int32(9000), int32(11000), "100000", "100000", "0", "0", max_timeout, adminAddr, "")
+	println("[INFO] Minting positions in baz-qux pool")
+	pn.Mint(cross(cur), bazPath, quxPath, uint32(500), int32(9000), int32(11000), "100000", "100000", "0", "0", max_timeout, adminAddr, "")
+
+	println("[INFO] Executing test scenarios")
+	println()
+	testDrySwapRouteBarQuxExactIn(cur)
+	testSwapRouteBarQuxExactIn(cur)
+	testDrySwapRouteBarQuxExactOut(cur)
+	testSwapRouteBarQuxExactOut(cur)
+	TestDrySwapRouteQuxBarExactIn(cur)
+	TestSwapRouteQuxBarExactIn(cur)
+	TestDrySwapRouteQuxBarExactOut(cur)
+	TestSwapRouteQuxBarExactOut(cur)
+
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Scenario completed")
+}
+
+func testDrySwapRouteBarQuxExactIn(cur realm) {
+	println("[SCENARIO] Given: Dry swap route bar to qux exact in preparation")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Executing dry swap route (bar → baz → qux)")
+	func(cur realm) {
+		_, dryResult, _ := router.DrySwapRoute(
+			barPath,    // inputToken
+			quxPath,    // outputToken
+			"1000",     // amountSpecified
+			"EXACT_IN", // swapType
+			"gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/qux.QUX:500", // strRouteArr
+			"100", // quoteArr
+			"100",
+		)
+
+		println("[EXPECTED] dryResult:", dryResult, "expected: 7326")
+		println()
+	}(cross(cur))
+}
+
+func testSwapRouteBarQuxExactIn(cur realm) {
+	println("[SCENARIO] Given: Swap route bar to qux exact in preparation")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Approving tokens for swap")
+	bar.Approve(cross(cur), routerAddr, 10000)
+
+	println("[INFO] Executing swap route (bar → baz → qux)")
+	amountIn, amountOut := router.ExactInSwapRoute(
+		cross(cur),
+		barPath, // inputToken
+		quxPath, // outputToken
+		"1000",  // amountSpecified
+		"gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/qux.QUX:500,gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/qux.QUX:500", // strRouteArr
+		"50,50", // quoteArr
+		"1",     // tokenAmountLimit
+		time.Now().Add(time.Hour).Unix(),
+		"", // referrer
+	)
+
+	println("[EXPECTED] amountIn:", amountIn, "expected: 1000")
+	println("[EXPECTED] amountOut:", amountOut, "expected: -7318")
+	println()
+}
+
+func testDrySwapRouteBarQuxExactOut(cur realm) {
+	println("[SCENARIO] Given: Dry swap route bar to qux exact out preparation")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Executing dry swap route exact out (bar → baz → qux)")
+	func(cur realm) {
+		dryResult, _, _ := router.DrySwapRoute(
+			barPath,     // inputToken
+			quxPath,     // outputToken
+			"1000",      // amountSpecified
+			"EXACT_OUT", // swapType
+			"gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/qux.QUX:500,gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/qux.QUX:500", // strRouteArr
+			"50,50", // quoteArr
+			"10000",
+		)
+
+		println("[EXPECTED] dryResult:", dryResult, "expected: 140")
+		println()
+	}(cross(cur))
+}
+
+func testSwapRouteBarQuxExactOut(cur realm) {
+	println("[SCENARIO] Given: Swap route bar to qux exact out preparation")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Approving tokens for swap")
+	bar.Approve(cross(cur), routerAddr, 99999)
+
+	println("[INFO] Executing swap route exact out (bar → baz → qux)")
+	amountIn, amountOut := router.ExactOutSwapRoute(
+		cross(cur),
+		barPath, // inputToken
+		quxPath, // outputToken
+		"1000",  // amountSpecified
+		"gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/qux.QUX:500,gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/qux.QUX:500", // strRouteArr
+		"60,40", // quoteArr
+		"99999", // tokenAmountLimit
+		time.Now().Add(time.Hour).Unix(),
+		"", // referrer
+	)
+
+	println("[EXPECTED] amountIn:", amountIn, "expected: 141")
+	println("[EXPECTED] amountOut:", amountOut, "expected: -1001")
+	println()
+}
+
+func TestDrySwapRouteQuxBarExactIn(cur realm) {
+	println("[SCENARIO] Given: Dry swap route qux to bar exact in preparation")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Executing dry swap route (qux → baz → bar)")
+	func(cur realm) {
+		_, dryResult, _ := router.DrySwapRoute(
+			quxPath,    // inputToken
+			barPath,    // outputToken
+			"1000",     // amountSpecified
+			"EXACT_IN", // swapType
+			"gno.land/r/onbloc/qux.QUX:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/bar.BAR:500,gno.land/r/onbloc/qux.QUX:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/bar.BAR:500", // strRouteArr
+			"30,70", // quoteArr
+			"1",
+		)
+
+		println("[EXPECTED] dryResult:", dryResult, "expected: 135")
+		println()
+	}(cross(cur))
+}
+
+func TestSwapRouteQuxBarExactIn(cur realm) {
+	println("[SCENARIO] Given: Swap route qux to bar exact in preparation")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Approving tokens for swap")
+	qux.Approve(cross(cur), routerAddr, 10000)
+
+	println("[INFO] Executing swap route (qux → baz → bar)")
+	amountIn, amountOut := router.ExactInSwapRoute(
+		cross(cur),
+		quxPath, // inputToken
+		barPath, // outputToken
+		"1000",  // amountSpecified
+		"gno.land/r/onbloc/qux.QUX:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/bar.BAR:500,gno.land/r/onbloc/qux.QUX:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/bar.BAR:500", // strRouteArr
+		"30,70", // quoteArr
+		"1",     // tokenAmountLimit
+		time.Now().Add(time.Hour).Unix(),
+		"", // referrer
+	)
+
+	println("[EXPECTED] amountIn:", amountIn, "expected: 1000")
+	println("[EXPECTED] amountOut:", amountOut, "expected: -135")
+	println()
+}
+
+func TestDrySwapRouteQuxBarExactOut(cur realm) {
+	println("[SCENARIO] Given: Dry swap route qux to bar exact out preparation")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Executing dry swap route exact out (qux → baz → bar)")
+	func(cur realm) {
+		dryResult, _, _ := router.DrySwapRoute(
+			quxPath,     // inputToken
+			barPath,     // outputToken
+			"1000",      // amountSpecified
+			"EXACT_OUT", // swapType
+			"gno.land/r/onbloc/qux.QUX:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/bar.BAR:500,gno.land/r/onbloc/qux.QUX:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/bar.BAR:500", // strRouteArr
+			"30,70", // quoteArr
+			"100000",
+		)
+
+		println("[EXPECTED] dryResult:", dryResult, "expected: 7359")
+		println()
+	}(cross(cur))
+}
+
+func TestSwapRouteQuxBarExactOut(cur realm) {
+	println("[SCENARIO] Given: Swap route qux to bar exact out preparation")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Approving tokens for swap")
+	qux.Approve(cross(cur), routerAddr, 99999)
+
+	println("[INFO] Executing swap route exact out (qux → baz → bar)")
+	amountIn, amountOut := router.ExactOutSwapRoute(
+		cross(cur),
+		quxPath, // inputToken
+		barPath, // outputToken
+		"1000",  // amountSpecified
+		"gno.land/r/onbloc/qux.QUX:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/bar.BAR:500,gno.land/r/onbloc/qux.QUX:gno.land/r/onbloc/baz.BAZ:500*POOL*gno.land/r/onbloc/baz.BAZ:gno.land/r/onbloc/bar.BAR:500", // strRouteArr
+		"30,70", // quoteArr
+		"99999", // tokenAmountLimit
+		time.Now().Add(time.Hour).Unix(),
+		"", // referrer
+	)
+
+	println("[EXPECTED] amountIn:", amountIn, "expected: 7365")
+	println("[EXPECTED] amountOut:", amountOut, "expected: -999")
+	println()
+}
+
+// Output:
+// [SCENARIO] #2 Route 2 Hop Test
+// [INFO] Starting scenario: Multi-hop routing with 2 routes and 2 hops
+// [INFO] Setting up pools and positions
+// [INFO] Creating bar-baz pool (fee: 500)
+// [INFO] Creating baz-qux pool (fee: 500)
+// [INFO] Approving tokens for pool operations
+// [INFO] Minting positions in bar-baz pool
+// [INFO] Minting positions in baz-qux pool
+// [INFO] Executing test scenarios
+//
+// [SCENARIO] Given: Dry swap route bar to qux exact in preparation
+// [INFO] Executing dry swap route (bar → baz → qux)
+// [EXPECTED] dryResult: 7326 expected: 7326
+//
+// [SCENARIO] Given: Swap route bar to qux exact in preparation
+// [INFO] Approving tokens for swap
+// [INFO] Executing swap route (bar → baz → qux)
+// [EXPECTED] amountIn: 1000 expected: 1000
+// [EXPECTED] amountOut: -7318 expected: -7318
+//
+// [SCENARIO] Given: Dry swap route bar to qux exact out preparation
+// [INFO] Executing dry swap route exact out (bar → baz → qux)
+// [EXPECTED] dryResult: 140 expected: 140
+//
+// [SCENARIO] Given: Swap route bar to qux exact out preparation
+// [INFO] Approving tokens for swap
+// [INFO] Executing swap route exact out (bar → baz → qux)
+// [EXPECTED] amountIn: 141 expected: 141
+// [EXPECTED] amountOut: -1001 expected: -1001
+//
+// [SCENARIO] Given: Dry swap route qux to bar exact in preparation
+// [INFO] Executing dry swap route (qux → baz → bar)
+// [EXPECTED] dryResult: 135 expected: 135
+//
+// [SCENARIO] Given: Swap route qux to bar exact in preparation
+// [INFO] Approving tokens for swap
+// [INFO] Executing swap route (qux → baz → bar)
+// [EXPECTED] amountIn: 1000 expected: 1000
+// [EXPECTED] amountOut: -135 expected: -135
+//
+// [SCENARIO] Given: Dry swap route qux to bar exact out preparation
+// [INFO] Executing dry swap route exact out (qux → baz → bar)
+// [EXPECTED] dryResult: 7359 expected: 7359
+//
+// [SCENARIO] Given: Swap route qux to bar exact out preparation
+// [INFO] Approving tokens for swap
+// [INFO] Executing swap route exact out (qux → baz → bar)
+// [EXPECTED] amountIn: 7373 expected: 7365
+// [EXPECTED] amountOut: -1000 expected: -999
+//
+// [INFO] Scenario completed

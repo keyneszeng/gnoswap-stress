@@ -1,0 +1,221 @@
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"gno.land/p/gnoswap/gnsmath"
+	"testing"
+	"time"
+
+	uassert "gno.land/p/nt/uassert/v0"
+
+	"gno.land/r/gnoswap/access"
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	"gno.land/r/gnoswap/router"
+	sr "gno.land/r/gnoswap/staker"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/baz"
+
+	"gno.land/r/gnoswap/gns"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	poolAddr, _ = access.GetAddress(prabc.ROLE_POOL.String())
+
+	routerAddr, _ = access.GetAddress(prabc.ROLE_ROUTER.String())
+
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	bazPath = "gno.land/r/onbloc/baz.BAZ"
+	fooPath = "gno.land/r/onbloc/foo.FOO"
+
+	max_timeout int64 = 9999999999
+	max_approve int64 = 9223372036854775806
+)
+
+var (
+	fee500  uint32 = 500
+	fee3000 uint32 = 3000
+
+	tier1 uint64 = 1
+)
+
+var t *testing.T
+
+func main(cur realm) {
+	println("[SCENARIO] #2 All Liquidity ExactOut 1route 1hop")
+	println("[INFO] Starting scenario: All liquidity exact out 1route 1hop")
+
+	println("[INFO] Setting up pool and position")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Approving pool creation fee")
+	gns.Approve(cross(cur), poolAddr, pl.GetPoolCreationFee())
+	println("[INFO] Creating bar-baz pool (fee: 500)")
+	pl.CreatePool(cross(cur), barPath, bazPath, fee500, gnsmath.TickMathGetSqrtRatioAtTick(1).ToString())
+
+	println("[INFO] Approving tokens for pool operations")
+	bar.Approve(cross(cur), poolAddr, 100000)
+	baz.Approve(cross(cur), poolAddr, 100000)
+
+	// Mint
+	println("[INFO] Minting position in bar-baz pool")
+	positionId, liquidity, amount0, amount1 := pn.Mint(cross(cur), barPath, bazPath, fee500, int32(-6000), int32(6000), "100000", "100000", "0", "0", max_timeout, adminAddr, "")
+
+	println("[INFO] positionId:", positionId)
+	println("[INFO] amount0:", amount0)
+	println("[INFO] amount1:", amount1)
+	println("[INFO] liquidity:", liquidity)
+
+	println("[EXPECTED] positionId:", positionId, "expected: 1")
+	println("[EXPECTED] amount0:", amount0, "expected: 99962")
+	println("[EXPECTED] amount1:", amount1, "expected: 100000")
+
+	pool, _ := pl.GetPool(barPath, bazPath, fee500)
+	poolLiq := pool.Liquidity()
+	println("[EXPECTED] pool liquidity:", poolLiq.ToString(), "expected: 385771")
+
+	poolPath := "gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:500"
+	poolTick := pl.GetSlot0Tick(poolPath)
+	println("[EXPECTED] pool tick:", poolTick, "expected: 1")
+
+	println("[INFO] Setting up additional pools and positions")
+	createPoolWithoutFee(cur, t)
+	makeForthMintPositionWithoutFee(cur, t)
+
+	println("[INFO] Setting swap permissions")
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] Approving tokens for swap")
+	bar.Approve(cross(cur), routerAddr, max_approve)
+	baz.Approve(cross(cur), routerAddr, max_approve) // ITS FOR 0.15% fee
+
+	expectedAmountSpecified := "119820"
+
+	println("[INFO] Attempting ExactOut swap (bar →", expectedAmountSpecified, "baz) with fee is almost 120000")
+	println("[INFO] Expected to fail due to insufficient liquidity")
+
+	println("[EXPECTED] Swap should fail with error: [GNOSWAP-ROUTER-001] slippage check failed || ExactOut: too much spent (max:0, used:168406)")
+
+	uassert.AbortsWithMessage(
+		t,
+		cur,
+		`[GNOSWAP-ROUTER-001] slippage check failed || ExactOut: too much spent (max:0, used:168406)`,
+		func() {
+			router.ExactOutSwapRoute(
+				cross(cur),
+				barPath,                 // inputToken
+				bazPath,                 // outputToken
+				expectedAmountSpecified, // amountSpecified
+				poolPath,                // strRouteArr
+				"100",                   // quoteArr
+				"0",                     // tokenAmountLimit
+				time.Now().Add(time.Hour).Unix(),
+				"", // referrer
+			)
+		})
+	println("[INFO] Scenario completed")
+}
+
+func createPoolWithoutFee(cur realm, t *testing.T) {
+	testing.SetRealm(adminRealm)
+	// set pool create fee to 0 for testing
+	pl.SetPoolCreationFee(cross(cur), 0)
+	createPool(cur, t, barPath, fooPath, fee500, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString(), adminAddr)
+	createPool(cur, t, bazPath, fooPath, fee3000, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString(), adminAddr)
+	createPool(cur, t, barPath, bazPath, fee3000, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString(), adminAddr)
+	createPool(cur, t, barPath, bazPath, fee500, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString(), adminAddr)
+}
+
+func createPool(cur realm, t *testing.T,
+	token0 string,
+	token1 string,
+	fee uint32,
+	sqrtPriceX96 string,
+	caller address,
+) {
+	t.Helper()
+
+	testing.SetRealm(testing.NewUserRealm(caller))
+	poolPath := pl.GetPoolPath(token0, token1, fee)
+	if !pl.ExistsPoolPath(poolPath) {
+		pl.CreatePool(cross(cur), token0, token1, fee, sqrtPriceX96)
+		sr.SetPoolTier(cross(cur), poolPath, tier1)
+	}
+}
+
+func makeForthMintPositionWithoutFee(cur realm, t *testing.T) (uint64, string, string, string) {
+	t.Helper()
+
+	// make actual data to test resetting not only position's state but also pool's state
+	testing.SetRealm(adminRealm)
+
+	barApprove(cur, t, adminAddr, poolAddr, max_approve)
+	bazApprove(cur, t, adminAddr, poolAddr, max_approve)
+
+	// mint position
+	return pn.Mint(
+		cross(cur),
+		barPath,
+		bazPath,
+		fee500,
+		-887220,
+		887220,
+		"50000",
+		"50000",
+		"0",
+		"0",
+		max_timeout,
+		adminAddr,
+		"",
+	)
+}
+
+func barApprove(cur realm, t *testing.T, owner, spender address, amount int64) {
+	t.Helper()
+	testing.SetRealm(testing.NewUserRealm(owner))
+	bar.Approve(cross(cur), spender, amount)
+}
+
+func bazApprove(cur realm, t *testing.T, owner, spender address, amount int64) {
+	t.Helper()
+	testing.SetRealm(testing.NewUserRealm(owner))
+	baz.Approve(cross(cur), spender, amount)
+}
+
+// Output:
+// [SCENARIO] #2 All Liquidity ExactOut 1route 1hop
+// [INFO] Starting scenario: All liquidity exact out 1route 1hop
+// [INFO] Setting up pool and position
+// [INFO] Approving pool creation fee
+// [INFO] Creating bar-baz pool (fee: 500)
+// [INFO] Approving tokens for pool operations
+// [INFO] Minting position in bar-baz pool
+// [INFO] positionId: 1
+// [INFO] amount0: 99962
+// [INFO] amount1: 100000
+// [INFO] liquidity: 385771
+// [EXPECTED] positionId: 1 expected: 1
+// [EXPECTED] amount0: 99962 expected: 99962
+// [EXPECTED] amount1: 100000 expected: 100000
+// [EXPECTED] pool liquidity: 385771 expected: 385771
+// [EXPECTED] pool tick: 1 expected: 1
+// [INFO] Setting up additional pools and positions
+// [INFO] Setting swap permissions
+// [INFO] Approving tokens for swap
+// [INFO] Attempting ExactOut swap (bar → 119820 baz) with fee is almost 120000
+// [INFO] Expected to fail due to insufficient liquidity
+// [EXPECTED] Swap should fail with error: [GNOSWAP-ROUTER-001] slippage check failed || ExactOut: too much spent (max:0, used:168406)
+// [INFO] Scenario completed

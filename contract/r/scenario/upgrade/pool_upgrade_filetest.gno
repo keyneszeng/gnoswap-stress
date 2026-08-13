@@ -1,0 +1,153 @@
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+// Pool contract upgrade scenario test
+package main
+
+import (
+	"testing"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	uassert "gno.land/p/nt/uassert/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/pool"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/pool/v2_invalid"
+)
+
+var t = &testing.T{}
+
+var (
+	adminAddr, _ = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm   = testing.NewUserRealm(adminAddr)
+)
+
+const (
+	poolV1Path   = "gno.land/r/gnoswap/pool/v1"
+	poolTestPath = "gno.land/r/gnoswap/pool/v2_invalid"
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Initialize pool contract with v1")
+	initializeV1(cur)
+	println()
+
+	println("[SCENARIO] 2. Upgrade pool contract to test version")
+	testPoolUpgrade(cur)
+	println()
+
+	println("[SCENARIO] 3. Verify test implementation panics correctly")
+	verifyTestImplementation(cur)
+	println()
+}
+
+func initializeV1(cur realm) {
+	currentVersion := pool.GetImplementationPackagePath()
+	ufmt.Printf("[INFO] Current implementation: %s\n", currentVersion)
+
+	if currentVersion != poolV1Path {
+		ufmt.Println("[INFO] Setting implementation to v1")
+		testing.SetRealm(adminRealm)
+		pool.UpgradeImpl(cross(cur), poolV1Path)
+		currentVersion = pool.GetImplementationPackagePath()
+	}
+
+	ufmt.Printf("[EXPECTED] Pool initialized with v1: %s\n", currentVersion)
+	if currentVersion != poolV1Path {
+		panic(ufmt.Sprintf("Expected v1, got %s", currentVersion))
+	}
+}
+
+func testPoolUpgrade(cur realm) {
+	// Verify current version is v1
+	currentVersion := pool.GetImplementationPackagePath()
+	ufmt.Printf("[INFO] Current version: %s\n", currentVersion)
+	if currentVersion != poolV1Path {
+		panic(ufmt.Sprintf("Expected v1, got %s", currentVersion))
+	}
+
+	// Upgrade to test version
+	ufmt.Println("[INFO] Upgrading pool contract to test version")
+	testing.SetRealm(adminRealm)
+	pool.UpgradeImpl(cross(cur), poolTestPath)
+
+	currentVersion = pool.GetImplementationPackagePath()
+	ufmt.Printf("[EXPECTED] Pool upgraded to: %s\n", currentVersion)
+	if currentVersion != poolTestPath {
+		panic(ufmt.Sprintf("Expected test version, got %s", currentVersion))
+	}
+}
+
+func verifyTestImplementation(cur realm) {
+	// Verify current version is test version
+	currentVersion := pool.GetImplementationPackagePath()
+	ufmt.Printf("[INFO] Current version: %s\n", currentVersion)
+	if currentVersion != poolTestPath {
+		panic(ufmt.Sprintf("Expected test version, got %s", currentVersion))
+	}
+
+	// Test CreatePool - should panic with test implementation message
+	ufmt.Println("[INFO] Testing CreatePool function panics correctly")
+	testing.SetRealm(adminRealm)
+	uassert.AbortsWithMessage(t, cur, "test implementation: CreatePool not supported", func() {
+		pool.CreatePool(cross(cur), "gno.land/r/onbloc/foo.FOO", "gno.land/r/onbloc/bar.BAR", 500, "79228162514264337593543950336")
+	})
+	ufmt.Println("[EXPECTED] CreatePool panics correctly")
+
+	// Test SetPoolCreationFee - should panic with test implementation message
+	ufmt.Println("[INFO] Testing SetPoolCreationFee function panics correctly")
+	testing.SetRealm(adminRealm)
+	uassert.AbortsWithMessage(t, cur, "test implementation: SetPoolCreationFee not supported", func() {
+		pool.SetPoolCreationFee(cross(cur), 100)
+	})
+	ufmt.Println("[EXPECTED] SetPoolCreationFee panics correctly")
+
+	// Test SetFeeProtocol - should panic with test implementation message
+	ufmt.Println("[INFO] Testing SetFeeProtocol function panics correctly")
+	testing.SetRealm(adminRealm)
+	uassert.AbortsWithMessage(t, cur, "test implementation: SetFeeProtocol not supported", func() {
+		pool.SetFeeProtocol(cross(cur), 6, 6)
+	})
+	ufmt.Println("[EXPECTED] SetFeeProtocol panics correctly")
+
+	// Test SetWithdrawalFee - should panic with test implementation message
+	ufmt.Println("[INFO] Testing SetWithdrawalFee function panics correctly")
+	testing.SetRealm(adminRealm)
+	uassert.AbortsWithMessage(t, cur, "test implementation: SetWithdrawalFee not supported", func() {
+		pool.SetWithdrawalFee(cross(cur), 100)
+	})
+	ufmt.Println("[EXPECTED] SetWithdrawalFee panics correctly")
+
+	// Test CollectProtocol - should panic with test implementation message
+	ufmt.Println("[INFO] Testing CollectProtocol function panics correctly")
+	testing.SetRealm(adminRealm)
+	uassert.AbortsWithMessage(t, cur, "test implementation: CollectProtocol not supported", func() {
+		pool.CollectProtocol(cross(cur), "gno.land/r/onbloc/foo.FOO", "gno.land/r/onbloc/bar.BAR", 500, adminAddr, "100", "100")
+	})
+	ufmt.Println("[EXPECTED] CollectProtocol panics correctly")
+}
+
+// Output:
+// [SCENARIO] 1. Initialize pool contract with v1
+// [INFO] Current implementation: gno.land/r/gnoswap/pool/v1
+// [EXPECTED] Pool initialized with v1: gno.land/r/gnoswap/pool/v1
+//
+// [SCENARIO] 2. Upgrade pool contract to test version
+// [INFO] Current version: gno.land/r/gnoswap/pool/v1
+// [INFO] Upgrading pool contract to test version
+// [EXPECTED] Pool upgraded to: gno.land/r/gnoswap/pool/v2_invalid
+//
+// [SCENARIO] 3. Verify test implementation panics correctly
+// [INFO] Current version: gno.land/r/gnoswap/pool/v2_invalid
+// [INFO] Testing CreatePool function panics correctly
+// [EXPECTED] CreatePool panics correctly
+// [INFO] Testing SetPoolCreationFee function panics correctly
+// [EXPECTED] SetPoolCreationFee panics correctly
+// [INFO] Testing SetFeeProtocol function panics correctly
+// [EXPECTED] SetFeeProtocol panics correctly
+// [INFO] Testing SetWithdrawalFee function panics correctly
+// [EXPECTED] SetWithdrawalFee panics correctly
+// [INFO] Testing CollectProtocol function panics correctly
+// [EXPECTED] CollectProtocol panics correctly

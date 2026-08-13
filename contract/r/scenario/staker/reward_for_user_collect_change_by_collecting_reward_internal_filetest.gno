@@ -1,0 +1,397 @@
+// reward for user collect change by collecting reward (internal) scenario test
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"strconv"
+	"testing"
+	"time"
+
+	"gno.land/p/gnoswap/gnsmath"
+	"gno.land/r/gnoswap/scenarioutils"
+
+	"gno.land/p/demo/tokens/grc721"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/emission"
+
+	"gno.land/r/gnoswap/gnft"
+	"gno.land/r/gnoswap/gns"
+
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	sr "gno.land/r/gnoswap/staker"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/baz"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminUser    = adminAddr
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	stakerAddr, _ = access.GetAddress(prabc.ROLE_STAKER.String())
+	stakerUser    = stakerAddr
+	stakerRealm   = testing.NewCodeRealm("gno.land/r/gnoswap/staker")
+
+	poolAddr, _ = access.GetAddress(prabc.ROLE_POOL.String())
+
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	bazPath = "gno.land/r/onbloc/baz.BAZ"
+
+	fee100 uint32 = 100
+
+	maxTimeout int64 = 9999999999
+	maxInt64   int64 = 9223372036854775807
+
+	poolPath = "gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:100"
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Initialize and setup")
+	initAndSetup(cur)
+	println()
+
+	println("[SCENARIO] 2. Create bar:baz:100 pool")
+	createPool(cur)
+	println()
+
+	println("[SCENARIO] 3. Mint and stake position")
+	mintAndStakePosition(cur)
+	println()
+
+	println("[SCENARIO] 4. First reward collection period")
+	firstRewardCollection(cur)
+	println()
+
+	println("[SCENARIO] 5. Second reward collection period")
+	secondRewardCollection(cur)
+	println()
+
+	println("[SCENARIO] 6. Third reward collection with longer interval")
+	thirdRewardCollectionLonger(cur)
+	println()
+
+	println("[SCENARIO] 7. Compare reward accumulation patterns")
+	compareRewardPatterns(cur)
+	println()
+
+	println("[SCENARIO] 8. Final verification with multiple collections")
+	finalVerificationMultipleCollections(cur)
+}
+
+func initAndSetup(cur realm) {
+	testing.SetRealm(adminRealm)
+	scenarioutils.EnsureCanonicalDefaultPool(cross(cur))
+	emission.SetDistributionStartTime(cross(cur), time.Now().Unix()+1)
+
+	println("[INFO] set unstaking fee to 0")
+	sr.SetUnStakingFee(cross(cur), 0)
+
+	println("[INFO] set pool creation fee to 0")
+	pl.SetPoolCreationFee(cross(cur), 0)
+
+	println("[INFO] register gns change callback")
+	testing.SetRealm(stakerRealm)
+}
+
+func createPool(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] create bar:baz:100 pool")
+	pl.CreatePool(cross(cur), barPath, bazPath, 100, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString())
+
+	println("[INFO] set pool to tier 1")
+	sr.SetPoolTier(cross(cur), poolPath, 1)
+
+	testing.SkipHeights(1)
+}
+
+func mintAndStakePosition(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve tokens for minting")
+	bar.Approve(cross(cur), poolAddr, maxInt64)
+	baz.Approve(cross(cur), poolAddr, maxInt64)
+	testing.SkipHeights(2)
+
+	println("[INFO] mint position 01 (tick range: -100 ~ 100)")
+	positionId, liquidity, _, _ := pn.Mint(
+		cross(cur),
+		barPath,
+		bazPath,
+		fee100,
+		int32(-100),
+		int32(100),
+		"1000",
+		"1000",
+		"1",
+		"1",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position ID: %d\n", positionId)
+	ufmt.Printf("[EXPECTED] liquidity: %s\n", liquidity)
+
+	println("[INFO] approve NFT to staker and stake position")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, positionId))
+	sr.StakeToken(cross(cur), positionId, "")
+
+	ufmt.Printf("[EXPECTED] position staked successfully\n")
+	testing.SkipHeights(1)
+}
+
+func firstRewardCollection(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] skip 5 blocks for first reward accumulation")
+	testing.SkipHeights(5)
+
+	println("[INFO] collect first reward")
+	beforeGns1 := gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 1)
+	afterGns1 := gns.BalanceOf(adminUser)
+	firstReward := afterGns1 - beforeGns1
+
+	ufmt.Printf("[EXPECTED] first reward (5 blocks): %d\n", firstReward)
+
+	if firstReward <= 0 {
+		panic("should have received first reward")
+	}
+
+	println("[INFO] first reward collection completed")
+}
+
+func secondRewardCollection(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] skip 5 blocks for second reward accumulation")
+	testing.SkipHeights(5)
+
+	println("[INFO] collect second reward")
+	beforeGns2 := gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 1)
+	afterGns2 := gns.BalanceOf(adminUser)
+	secondReward := afterGns2 - beforeGns2
+
+	ufmt.Printf("[EXPECTED] second reward (5 blocks): %d\n", secondReward)
+
+	if secondReward <= 0 {
+		panic("should have received second reward")
+	}
+
+	println("[INFO] second reward collection completed")
+}
+
+func thirdRewardCollectionLonger(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] skip 10 blocks for third reward accumulation (longer period)")
+	testing.SkipHeights(10)
+
+	println("[INFO] collect third reward")
+	beforeGns3 := gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 1)
+	afterGns3 := gns.BalanceOf(adminUser)
+	thirdReward := afterGns3 - beforeGns3
+
+	ufmt.Printf("[EXPECTED] third reward (10 blocks): %d\n", thirdReward)
+
+	if thirdReward <= 0 {
+		panic("should have received third reward")
+	}
+
+	println("[INFO] third reward collection completed")
+}
+
+func compareRewardPatterns(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] analyze reward accumulation patterns")
+
+	// Test multiple small collections vs one large collection
+	println("[INFO] test pattern: frequent small collections")
+	totalFromFrequentCollections := int64(0)
+
+	// Collect rewards every 2 blocks, 5 times (total 10 blocks)
+	for i := 0; i < 5; i++ {
+		testing.SkipHeights(2)
+		beforeGns := gns.BalanceOf(adminUser)
+		sr.CollectReward(cross(cur), 1)
+		afterGns := gns.BalanceOf(adminUser)
+		rewardFromSmallCollection := afterGns - beforeGns
+		totalFromFrequentCollections += rewardFromSmallCollection
+		ufmt.Printf("[INFO] small collection %d (2 blocks): %d\n", i+1, rewardFromSmallCollection)
+	}
+
+	ufmt.Printf("[EXPECTED] total from frequent collections (10 blocks): %d\n", totalFromFrequentCollections)
+
+	// Now test one large collection for comparison
+	println("[INFO] test pattern: single large collection")
+	testing.SkipHeights(10)
+	beforeGnsLarge := gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 1)
+	afterGnsLarge := gns.BalanceOf(adminUser)
+	rewardFromLargeCollection := afterGnsLarge - beforeGnsLarge
+
+	ufmt.Printf("[EXPECTED] single large collection (10 blocks): %d\n", rewardFromLargeCollection)
+
+	println("[INFO] reward pattern analysis:")
+	ufmt.Printf("[INFO] - Frequent collections total: %d\n", totalFromFrequentCollections)
+	ufmt.Printf("[INFO] - Single large collection: %d\n", rewardFromLargeCollection)
+
+	if totalFromFrequentCollections != rewardFromLargeCollection {
+		println("[INFO] reward amounts may vary due to emission timing and block-based calculations")
+	} else {
+		println("[INFO] reward amounts are consistent regardless of collection frequency")
+	}
+}
+
+func finalVerificationMultipleCollections(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] final verification with multiple rapid collections")
+
+	// Record initial balance
+	initialBalance := gns.BalanceOf(adminUser)
+	ufmt.Printf("[INFO] initial GNS balance: %d\n", initialBalance)
+
+	// Skip some blocks to accumulate rewards
+	testing.SkipHeights(15)
+
+	// Perform multiple collections in sequence
+	println("[INFO] perform 3 consecutive collections")
+
+	collection1Before := gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 1)
+	collection1After := gns.BalanceOf(adminUser)
+	reward1 := collection1After - collection1Before
+	ufmt.Printf("[EXPECTED] consecutive collection 1: %d\n", reward1)
+
+	collection2Before := gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 1)
+	collection2After := gns.BalanceOf(adminUser)
+	reward2 := collection2After - collection2Before
+	ufmt.Printf("[EXPECTED] consecutive collection 2: %d\n", reward2)
+
+	collection3Before := gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 1)
+	collection3After := gns.BalanceOf(adminUser)
+	reward3 := collection3After - collection3Before
+	ufmt.Printf("[EXPECTED] consecutive collection 3: %d\n", reward3)
+
+	// Only the first collection should yield rewards, subsequent ones should be 0
+	if reward1 <= 0 {
+		panic("first collection should have yielded rewards")
+	}
+
+	if reward2 != 0 {
+		panic("second consecutive collection should yield 0 rewards")
+	}
+
+	if reward3 != 0 {
+		panic("third consecutive collection should yield 0 rewards")
+	}
+
+	finalBalance := gns.BalanceOf(adminUser)
+	totalGained := finalBalance - initialBalance
+	ufmt.Printf("[EXPECTED] total GNS gained in this test: %d\n", totalGained)
+
+	println("[INFO] reward collection pattern scenario completed successfully")
+	println("[INFO] confirmed: rewards accumulate over time and are collected when requested")
+}
+
+func positionIdFrom(cur realm, positionId any) grc721.TokenID {
+	if positionId == nil {
+		panic("positionId is nil")
+	}
+
+	switch positionId.(type) {
+	case string:
+		return grc721.TokenID(positionId.(string))
+	case int:
+		return grc721.TokenID(strconv.Itoa(positionId.(int)))
+	case uint64:
+		return grc721.TokenID(strconv.Itoa(int(positionId.(uint64))))
+	case grc721.TokenID:
+		return positionId.(grc721.TokenID)
+	default:
+		panic("unsupported positionId type")
+	}
+}
+
+// Output:
+// [SCENARIO] 1. Initialize and setup
+// [INFO] set unstaking fee to 0
+// [INFO] set pool creation fee to 0
+// [INFO] register gns change callback
+//
+// [SCENARIO] 2. Create bar:baz:100 pool
+// [INFO] create bar:baz:100 pool
+// [INFO] set pool to tier 1
+//
+// [SCENARIO] 3. Mint and stake position
+// [INFO] approve tokens for minting
+// [INFO] mint position 01 (tick range: -100 ~ 100)
+// [EXPECTED] position ID: 1
+// [EXPECTED] liquidity: 200510
+// [INFO] approve NFT to staker and stake position
+// [EXPECTED] position staked successfully
+//
+// [SCENARIO] 4. First reward collection period
+// [INFO] skip 5 blocks for first reward accumulation
+// [INFO] collect first reward
+// [EXPECTED] first reward (5 blocks): 24079616
+// [INFO] first reward collection completed
+//
+// [SCENARIO] 5. Second reward collection period
+// [INFO] skip 5 blocks for second reward accumulation
+// [INFO] collect second reward
+// [EXPECTED] second reward (5 blocks): 20066347
+// [INFO] second reward collection completed
+//
+// [SCENARIO] 6. Third reward collection with longer interval
+// [INFO] skip 10 blocks for third reward accumulation (longer period)
+// [INFO] collect third reward
+// [EXPECTED] third reward (10 blocks): 40132695
+// [INFO] third reward collection completed
+//
+// [SCENARIO] 7. Compare reward accumulation patterns
+// [INFO] analyze reward accumulation patterns
+// [INFO] test pattern: frequent small collections
+// [INFO] small collection 1 (2 blocks): 8026538
+// [INFO] small collection 2 (2 blocks): 8026539
+// [INFO] small collection 3 (2 blocks): 8026539
+// [INFO] small collection 4 (2 blocks): 8026538
+// [INFO] small collection 5 (2 blocks): 8026539
+// [EXPECTED] total from frequent collections (10 blocks): 40132693
+// [INFO] test pattern: single large collection
+// [EXPECTED] single large collection (10 blocks): 40132694
+// [INFO] reward pattern analysis:
+// [INFO] - Frequent collections total: 40132693
+// [INFO] - Single large collection: 40132694
+// [INFO] reward amounts may vary due to emission timing and block-based calculations
+//
+// [SCENARIO] 8. Final verification with multiple collections
+// [INFO] final verification with multiple rapid collections
+// [INFO] initial GNS balance: 100000164544045
+// [INFO] perform 3 consecutive collections
+// [EXPECTED] consecutive collection 1: 60199042
+// [EXPECTED] consecutive collection 2: 0
+// [EXPECTED] consecutive collection 3: 0
+// [EXPECTED] total GNS gained in this test: 60199042
+// [INFO] reward collection pattern scenario completed successfully
+// [INFO] confirmed: rewards accumulate over time and are collected when requested

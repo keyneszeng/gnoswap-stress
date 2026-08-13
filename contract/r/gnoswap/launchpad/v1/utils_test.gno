@@ -1,0 +1,145 @@
+package launchpad
+
+import (
+	"testing"
+
+	uassert "gno.land/p/nt/uassert/v0"
+)
+
+func TestUtils_parseProjectTierID(cur realm, t *testing.T) {
+	tests := []struct {
+		name              string
+		projectTierID     string
+		expectedProjectID string
+		expectedDuration  int64
+		expectedPanic     bool
+		expectedErrorMsg  string
+	}{
+		{
+			name:              "valid project tier id with tier 30",
+			projectTierID:     "gno.land/r/demo/token:100:30",
+			expectedProjectID: "gno.land/r/demo/token:100",
+			expectedDuration:  30,
+			expectedPanic:     false,
+		},
+		{
+			name:              "valid project tier id with tier 90",
+			projectTierID:     "gno.land/r/demo/token:100:90",
+			expectedProjectID: "gno.land/r/demo/token:100",
+			expectedDuration:  90,
+			expectedPanic:     false,
+		},
+		{
+			name:              "valid project tier id with tier 180",
+			projectTierID:     "gno.land/r/demo/token:100:180",
+			expectedProjectID: "gno.land/r/demo/token:100",
+			expectedDuration:  180,
+			expectedPanic:     false,
+		},
+		{
+			name:             "panic when tier id has only 2 parts",
+			projectTierID:    "gno.land/r/demo/token:100",
+			expectedPanic:    true,
+			expectedErrorMsg: "GNOSWAP-LAUNCHPAD-009",
+		},
+		{
+			name:             "panic when tier id has only 1 part",
+			projectTierID:    "gno.land/r/demo/token",
+			expectedPanic:    true,
+			expectedErrorMsg: "GNOSWAP-LAUNCHPAD-009",
+		},
+		{
+			name:             "panic when tier id has 4 parts",
+			projectTierID:    "gno.land/r/demo/token:100:30:extra",
+			expectedPanic:    true,
+			expectedErrorMsg: "GNOSWAP-LAUNCHPAD-009",
+		},
+		{
+			name:             "panic when tier duration is not integer",
+			projectTierID:    "gno.land/r/demo/token:100:invalid",
+			expectedPanic:    true,
+			expectedErrorMsg: "GNOSWAP-LAUNCHPAD-009",
+		},
+		{
+			name:             "panic when tier duration is invalid (not 30/90/180)",
+			projectTierID:    "gno.land/r/demo/token:100:60",
+			expectedPanic:    true,
+			expectedErrorMsg: "GNOSWAP-LAUNCHPAD-007",
+		},
+		{
+			name:             "panic when tier duration is negative",
+			projectTierID:    "gno.land/r/demo/token:100:-30",
+			expectedPanic:    true,
+			expectedErrorMsg: "GNOSWAP-LAUNCHPAD-007",
+		},
+		{
+			name:             "panic when tier duration is zero",
+			projectTierID:    "gno.land/r/demo/token:100:0",
+			expectedPanic:    true,
+			expectedErrorMsg: "GNOSWAP-LAUNCHPAD-007",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			if tt.expectedPanic {
+				defer func() {
+					r := recover()
+					uassert.NotNil(t, r)
+					uassert.ErrorContains(t, r.(error), tt.expectedErrorMsg)
+				}()
+			}
+
+			projectID, duration := parseProjectTierID(tt.projectTierID)
+
+			if !tt.expectedPanic {
+				uassert.Equal(t, projectID, tt.expectedProjectID)
+				uassert.Equal(t, duration, tt.expectedDuration)
+			}
+		})
+	}
+}
+
+func TestUtils_buildConditionEventAttrs(cur realm, t *testing.T) {
+	tests := []struct {
+		name             string
+		conditionTokens  string
+		conditionAmounts string
+		expected         []string
+	}{
+		{
+			name:             "empty conditions return empty attrs",
+			conditionTokens:  "",
+			conditionAmounts: "",
+			expected:         []string{},
+		},
+		{
+			name:             "single condition is encoded as one attr pair",
+			conditionTokens:  "gno.land/r/onbloc/bar.BAR",
+			conditionAmounts: "1000000",
+			expected: []string{
+				"conditionsTokens[0]", "gno.land/r/onbloc/bar.BAR*PAD*1000000",
+			},
+		},
+		{
+			name:             "multiple conditions preserve index order",
+			conditionTokens:  "gno.land/r/onbloc/foo.FOO*PAD*gno.land/r/onbloc/bar.BAR",
+			conditionAmounts: "1000*PAD*2000",
+			expected: []string{
+				"conditionsTokens[0]", "gno.land/r/onbloc/foo.FOO*PAD*1000",
+				"conditionsTokens[1]", "gno.land/r/onbloc/bar.BAR*PAD*2000",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			result := buildConditionEventAttrs(tt.conditionTokens, tt.conditionAmounts)
+
+			uassert.Equal(t, len(result), len(tt.expected))
+			for i := 0; i < len(tt.expected); i++ {
+				uassert.Equal(t, result[i], tt.expected[i])
+			}
+		})
+	}
+}

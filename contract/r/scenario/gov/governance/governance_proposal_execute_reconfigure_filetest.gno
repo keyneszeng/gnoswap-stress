@@ -1,0 +1,138 @@
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+// governance proposal execute - reconfigure governance
+
+package main
+
+import (
+	"chain/runtime"
+	"testing"
+
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/protocol_fee"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+
+	"gno.land/r/gnoswap/access"
+
+	"gno.land/r/gnoswap/gov/governance"
+	_ "gno.land/r/gnoswap/gov/governance/v1"
+
+	govStaker "gno.land/r/gnoswap/gov/staker"
+	_ "gno.land/r/gnoswap/gov/staker/v1"
+
+	"gno.land/r/gnoswap/gns"
+)
+
+var (
+	adminAddr        = access.MustGetAddress(prbac.ROLE_ADMIN.String())
+	govStakerAddr    = access.MustGetAddress(prbac.ROLE_GOV_STAKER.String())
+	currentBlockTime = int64(2)
+)
+
+func main(cur realm) {
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+	config := governance.GetLatestConfig()
+
+	println("[SCENARIO] 1. Delegate gns to admin")
+	delegateGnsToAdmin(cur)
+	println()
+
+	println("[SCENARIO] 2. Skip voting smoothing duration for create proposal")
+	testing.SkipHeights(int64(config.VotingWeightSmoothingDuration) / currentBlockTime)
+	println("[INFO] current height:", runtime.ChainHeight())
+	println()
+
+	println("[SCENARIO] 3. Propose Reconfigure Governance Parameters")
+	proposalID := proposeReconfigureGovernance(cur)
+	println()
+
+	println("[SCENARIO] 4. Skip voting start delay for ready to vote")
+	testing.SkipHeights(int64(config.VotingStartDelay) / currentBlockTime)
+	println("[INFO] current height:", runtime.ChainHeight())
+	println()
+
+	println("[SCENARIO] 5. Vote for the proposal")
+	vote(cur, proposalID, true)
+	println()
+
+	println("[SCENARIO] 6. Skip voting period for ready to execute")
+	testing.SkipHeights(int64(config.VotingPeriod) / currentBlockTime)
+	println("[INFO] current height:", runtime.ChainHeight())
+	println()
+
+	println("[SCENARIO] 7. Execute the reconfigure governance parameters proposal")
+	executeReconfigureGovernance(cur, proposalID)
+	println()
+}
+
+func delegateGnsToAdmin(cur realm) {
+	delegatedAmount := int64(1_000_000_000)
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+
+	gns.Approve(cross(cur), govStakerAddr, delegatedAmount)
+	govStaker.Delegate(cross(cur), adminAddr, int64(delegatedAmount), "")
+
+	ufmt.Printf("[INFO] gns delegated to %s (amount: %d)\n", adminAddr.String(), delegatedAmount)
+}
+
+func proposeReconfigureGovernance(cur realm) int64 {
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+	proposalID := governance.ProposeParameterChange(cross(cur), "gov", "reconfigure", 1, "gno.land/r/gnoswap/gov/governance*EXE*Reconfigure*EXE*123,456,789,60,5678,12345,67890")
+
+	ufmt.Printf("[INFO] Reconfigure Governance Parameters Proposal ID: %d\n", proposalID)
+	return proposalID
+}
+
+func vote(cur realm, proposalID int64, yea bool) {
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+
+	prevYeaNum, _ := governance.GetYeaByProposalId(proposalID)
+	prevNayNum, _ := governance.GetNayByProposalId(proposalID)
+
+	governance.Vote(cross(cur), proposalID, yea)
+
+	afterYeaNum, _ := governance.GetYeaByProposalId(proposalID)
+	afterNayNum, _ := governance.GetNayByProposalId(proposalID)
+	ufmt.Printf("[EXPECTED] before proposal %d voting - yea: %d, nay: %d\n", proposalID, prevYeaNum, prevNayNum)
+	ufmt.Printf("[EXPECTED] after proposal %d voting - yea: %d, nay: %d\n", proposalID, afterYeaNum, afterNayNum)
+}
+
+func executeReconfigureGovernance(cur realm, proposalID int64) {
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+	prevGovConfig := governance.GetLatestConfig()
+
+	governance.Execute(cross(cur), proposalID)
+
+	afterGovConfig := governance.GetLatestConfig()
+
+	ufmt.Printf("[EXPECTED] before proposal %d executing - voting start delay: %d, voting period: %d, quorum: %d\n", proposalID, prevGovConfig.VotingStartDelay, prevGovConfig.VotingPeriod, prevGovConfig.Quorum)
+	ufmt.Printf("[EXPECTED] after proposal %d executing - voting start delay: %d, voting period: %d, quorum: %d\n", proposalID, afterGovConfig.VotingStartDelay, afterGovConfig.VotingPeriod, afterGovConfig.Quorum)
+}
+
+// Output:
+// [SCENARIO] 1. Delegate gns to admin
+// [INFO] gns delegated to g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5 (amount: 1000000000)
+//
+// [SCENARIO] 2. Skip voting smoothing duration for create proposal
+// [INFO] current height: 43323
+//
+// [SCENARIO] 3. Propose Reconfigure Governance Parameters
+// [INFO] Reconfigure Governance Parameters Proposal ID: 1
+//
+// [SCENARIO] 4. Skip voting start delay for ready to vote
+// [INFO] current height: 86523
+//
+// [SCENARIO] 5. Vote for the proposal
+// [EXPECTED] before proposal 1 voting - yea: 0, nay: 0
+// [EXPECTED] after proposal 1 voting - yea: 1000000000, nay: 0
+//
+// [SCENARIO] 6. Skip voting period for ready to execute
+// [INFO] current height: 388923
+//
+// [SCENARIO] 7. Execute the reconfigure governance parameters proposal
+// [EXPECTED] before proposal 1 executing - voting start delay: 86400, voting period: 604800, quorum: 50
+// [EXPECTED] after proposal 1 executing - voting start delay: 123, voting period: 456, quorum: 60

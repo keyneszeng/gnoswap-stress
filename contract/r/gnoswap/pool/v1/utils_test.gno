@@ -1,0 +1,1027 @@
+package pool
+
+import (
+	"testing"
+
+	"gno.land/p/gnoswap/consts"
+	"gno.land/p/gnoswap/gnsmath"
+	i256 "gno.land/p/gnoswap/int256"
+	u256 "gno.land/p/gnoswap/uint256"
+	uassert "gno.land/p/nt/uassert/v0"
+	pl "gno.land/r/gnoswap/pool"
+)
+
+const (
+	MAX_UINT256 string = "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+
+	UINT64_MAX uint64 = 18446744073709551615
+)
+
+func TestU256Min(cur realm, t *testing.T) {
+	tests := []struct {
+		name     string
+		num1     string
+		num2     string
+		expected string
+	}{
+		// Basic cases
+		{
+			name:     "num1 is less than num2",
+			num1:     "1",
+			num2:     "2",
+			expected: "1",
+		},
+		{
+			name:     "num1 is greater than num2",
+			num1:     "2",
+			num2:     "1",
+			expected: "1",
+		},
+		{
+			name:     "num1 is equal to num2",
+			num1:     "1",
+			num2:     "1",
+			expected: "1",
+		},
+
+		// Edge cases with zero
+		{
+			name:     "compare max u256 with zero",
+			num1:     MAX_UINT256,
+			num2:     "0",
+			expected: "0",
+		},
+		{
+			name:     "compare zero with non-zero",
+			num1:     "0",
+			num2:     "1",
+			expected: "0",
+		},
+
+		// Close values
+		{
+			name:     "very close values (num1 smaller)",
+			num1:     "999999999999999999",
+			num2:     "1000000000000000000",
+			expected: "999999999999999999",
+		},
+		{
+			name:     "very close values (num2 smaller)",
+			num1:     "1000000000000000000",
+			num2:     "999999999999999999",
+			expected: "999999999999999999",
+		},
+
+		// Large values
+		{
+			name:     "large values (num1 smaller)",
+			num1:     "115792089237316195423570985008687907853269984665640564039457584007913129639934",
+			num2:     MAX_UINT256,
+			expected: "115792089237316195423570985008687907853269984665640564039457584007913129639934",
+		},
+		{
+			name:     "large values (num2 smaller)",
+			num1:     MAX_UINT256,
+			num2:     "115792089237316195423570985008687907853269984665640564039457584007913129639934",
+			expected: "115792089237316195423570985008687907853269984665640564039457584007913129639934",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			num1 := u256.MustFromDecimal(tt.num1)
+			num2 := u256.MustFromDecimal(tt.num2)
+			expected := u256.MustFromDecimal(tt.expected)
+
+			result := u256Min(num1, num2)
+			uassert.Equal(t, expected.ToString(), result.ToString())
+		})
+	}
+}
+
+func TestU256Min_AdditionalCases(cur realm, t *testing.T) {
+	tests := []struct {
+		name     string
+		num1     string
+		num2     string
+		expected string
+	}{
+		// Q values comparison
+		{
+			name:     "Q64 vs Q96",
+			num1:     Q64,
+			num2:     Q96,
+			expected: Q64,
+		},
+		{
+			name:     "Q96 vs Q128",
+			num1:     Q96,
+			num2:     Q128,
+			expected: Q96,
+		},
+		// Price boundaries
+		{
+			name:     "MIN_SQRT_RATIO vs MAX_SQRT_RATIO",
+			num1:     MIN_SQRT_RATIO,
+			num2:     MAX_SQRT_RATIO,
+			expected: MIN_SQRT_RATIO,
+		},
+		// Different magnitudes
+		{
+			name:     "very small vs very large",
+			num1:     "1",
+			num2:     MAX_UINT256,
+			expected: "1",
+		},
+		{
+			name:     "consecutive values",
+			num1:     "999999999999999999999999999999999999999",
+			num2:     "1000000000000000000000000000000000000000",
+			expected: "999999999999999999999999999999999999999",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			num1 := u256.MustFromDecimal(tt.num1)
+			num2 := u256.MustFromDecimal(tt.num2)
+			expected := u256.MustFromDecimal(tt.expected)
+
+			result := u256Min(num1, num2)
+			uassert.Equal(t, expected.ToString(), result.ToString())
+
+			// Test commutativity
+			resultReversed := u256Min(num2, num1)
+			uassert.Equal(t, expected.ToString(), resultReversed.ToString())
+		})
+	}
+}
+
+func TestToUint128InputPreservation(cur realm, t *testing.T) {
+	tests := []struct {
+		name                      string
+		input                     string
+		expectedResult            string
+		expectedOriginal          string
+		shouldBeDifferentInstance bool
+	}{
+		{
+			name:                      "overflow case - input preservation",
+			input:                     MAX_UINT256,
+			expectedResult:            MAX_UINT128,
+			expectedOriginal:          MAX_UINT256,
+			shouldBeDifferentInstance: true,
+		},
+		{
+			name:                      "within range case - input preservation",
+			input:                     "1000",
+			expectedResult:            "1000",
+			expectedOriginal:          "1000",
+			shouldBeDifferentInstance: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			original := u256.MustFromDecimal(tt.input)
+			result := toUint128(original)
+
+			// Original should be unchanged
+			uassert.Equal(t, tt.expectedOriginal, original.ToString())
+			// Result should have expected value
+			uassert.Equal(t, tt.expectedResult, result.ToString())
+
+			// Check instance relationship
+			if tt.shouldBeDifferentInstance {
+				uassert.True(t, result != original, "result should be a different instance")
+			} else {
+				uassert.True(t, result == original, "result should be the same instance")
+			}
+		})
+	}
+}
+
+func TestToUint128_PowerOfTwoBoundaries(cur realm, t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "Q64 (2^64)",
+			input:    Q64,
+			expected: Q64,
+		},
+		{
+			name:     "Q96 (2^96)",
+			input:    Q96,
+			expected: Q96,
+		},
+		{
+			name:     "2^127",
+			input:    "170141183460469231731687303715884105728",
+			expected: "170141183460469231731687303715884105728",
+		},
+		{
+			name:     "Q128 (2^128) wraps to 0",
+			input:    Q128,
+			expected: "0",
+		},
+		{
+			name:     "2^128 + 1 wraps to 1",
+			input:    "340282366920938463463374607431768211457",
+			expected: "1",
+		},
+		{
+			name:     "2^129 wraps to 0",
+			input:    "680564733841876926926749214863536422912",
+			expected: "0",
+		},
+		{
+			name:     "MAX_UINT128 * 2 + 10",
+			input:    "680564733841876926926749214863536422920",
+			expected: "8",
+		},
+		// Price boundaries
+		{
+			name:     "MIN_SQRT_RATIO",
+			input:    MIN_SQRT_RATIO,
+			expected: MIN_SQRT_RATIO,
+		},
+		{
+			name:     "MAX_SQRT_RATIO overflows uint128",
+			input:    MAX_SQRT_RATIO,
+			expected: "318775800626314356294205765087544249638",
+			// MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342
+			// This value is used as the maximum price square root in Uniswap V3
+			// When masked to uint128 (keeping only lower 128 bits):
+			// Binary: ...10101010101010101010101010100110 (lower 128 bits)
+			// Decimal: 318775800626314356294205765087544249638
+		},
+		{
+			name:     "MIN_PRICE",
+			input:    MIN_PRICE,
+			expected: MIN_PRICE,
+		},
+		{
+			name:     "MAX_PRICE overflows uint128",
+			input:    MAX_PRICE,
+			expected: "318775800626314356294205765087544249637",
+			// MAX_PRICE = MAX_SQRT_RATIO - 1 = 1461446703485210103287273052203988822378723970341
+			// When masked to uint128:
+			// Result: 318775800626314356294205765087544249637 (masked MAX_SQRT_RATIO - 1)
+			// This masking ensures price calculations remain within bounds
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			original := u256.MustFromDecimal(tt.input)
+			originalStr := original.ToString()
+
+			result := toUint128(original)
+
+			uassert.Equal(t, tt.expected, result.ToString())
+			uassert.Equal(t, originalStr, original.ToString())
+		})
+	}
+}
+
+func TestVerifyToUint128MaskingLogic(cur realm, t *testing.T) {
+	// 1. Verify toUint128 function logic
+	// toUint128 keeps only lower 128 bits when value > MAX_UINT128
+
+	// Verify MAX_UINT128
+	maxUint128 := u256.MustFromDecimal(MAX_UINT128)
+	uassert.Equal(t, "340282366920938463463374607431768211455", maxUint128.ToString())
+	uassert.Equal(t, MAX_UINT128, maxUint128.ToString())
+
+	// 2. Verify MAX_SQRT_RATIO
+
+	maxSqrtRatio := consts.MaxSqrtRatio()
+	uassert.Equal(t, MAX_SQRT_RATIO, "1461446703485210103287273052203988822378723970342")
+	uassert.True(t, maxSqrtRatio.Gt(maxUint128), "MAX_SQRT_RATIO should be > MAX_UINT128")
+
+	// 3. Verify masking logic
+	// mask = (1 << 128) - 1 = MAX_UINT128
+	mask := new(u256.Uint).Lsh(u256.One(), 128)
+	mask = new(u256.Uint).Sub(mask, u256.One())
+	uassert.Equal(t, mask.ToString(), maxUint128.ToString())
+
+	// 4. Verify actual masking
+	maskedMaxSqrt := new(u256.Uint).And(maxSqrtRatio, mask)
+	uassert.Equal(t, "318775800626314356294205765087544249638", maskedMaxSqrt.ToString())
+
+	// 5. Verify toUint128 function result matches manual masking
+	toUint128Result := toUint128(maxSqrtRatio)
+	uassert.Equal(t, maskedMaxSqrt.ToString(), toUint128Result.ToString())
+
+	// 6. Verify MAX_PRICE (MAX_SQRT_RATIO - 1)
+	maxPrice := u256.MustFromDecimal(MAX_PRICE)
+	uassert.Equal(t, MAX_PRICE, "1461446703485210103287273052203988822378723970341")
+
+	// Verify MAX_PRICE = MAX_SQRT_RATIO - 1
+	maxSqrtMinusOne := new(u256.Uint).Sub(maxSqrtRatio, u256.One())
+	uassert.True(t, maxPrice.Eq(maxSqrtMinusOne), "MAX_PRICE should equal MAX_SQRT_RATIO - 1")
+
+	// 7. Verify MAX_PRICE masking
+	maskedMaxPrice := new(u256.Uint).And(maxPrice, mask)
+	uassert.Equal(t, "318775800626314356294205765087544249637", maskedMaxPrice.ToString())
+
+	toUint128PriceResult := toUint128(maxPrice)
+	uassert.Equal(t, maskedMaxPrice.ToString(), toUint128PriceResult.ToString())
+
+	// 8. Verify difference between masked values is 1
+	diff := new(u256.Uint).Sub(maskedMaxSqrt, maskedMaxPrice)
+	uassert.Equal(t, "1", diff.ToString())
+
+	// Final verification
+	uassert.Equal(t, "318775800626314356294205765087544249638", toUint128Result.ToString())
+	uassert.Equal(t, "318775800626314356294205765087544249637", toUint128PriceResult.ToString())
+}
+
+// Additional verification: Ensure masked values are within uint128 range
+func TestToUint128MaskedValuesRange(cur realm, t *testing.T) {
+	maxUint128 := u256.MustFromDecimal(MAX_UINT128)
+	maxSqrtRatio := consts.MaxSqrtRatio()
+
+	// toUint128 results
+	resultMaxSqrt := toUint128(maxSqrtRatio)
+	resultMaxPrice := toUint128(u256.MustFromDecimal(MAX_PRICE))
+
+	// Verify results are <= MAX_UINT128
+	uassert.True(t, resultMaxSqrt.Lte(maxUint128), "Masked MAX_SQRT_RATIO should be <= MAX_UINT128")
+	uassert.True(t, resultMaxPrice.Lte(maxUint128), "Masked MAX_PRICE should be <= MAX_UINT128")
+
+	// Verify specific values
+	uassert.Equal(t, "318775800626314356294205765087544249638", resultMaxSqrt.ToString())
+	uassert.Equal(t, "318775800626314356294205765087544249637", resultMaxPrice.ToString())
+}
+
+func TestCheckOverFlowInt128_BoundaryValues(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		shouldPanic bool
+		errorMsg    string
+	}{
+		// Exact boundaries
+		{
+			name:        "MAX_INT128 exact",
+			input:       MAX_INT128,
+			shouldPanic: false,
+		},
+		{
+			name:        "MAX_INT128 + 1",
+			input:       "170141183460469231731687303715884105728",
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-020] overflow: amount(170141183460469231731687303715884105728) overflows int128 range",
+		},
+		// Negative values
+		{
+			name:        "negative MAX_INT128",
+			input:       "-170141183460469231731687303715884105727",
+			shouldPanic: false,
+		},
+		{
+			name:        "negative MAX_INT128 - 1",
+			input:       "-170141183460469231731687303715884105728",
+			shouldPanic: false,
+		},
+		// Q values
+		{
+			name:        "Q96 within range",
+			input:       Q96,
+			shouldPanic: false,
+		},
+		{
+			name:        "Q128 exceeds range",
+			input:       Q128,
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-020] overflow: amount(340282366920938463463374607431768211456) overflows int128 range",
+		},
+		// Special values
+		{
+			name:        "zero",
+			input:       "0",
+			shouldPanic: false,
+		},
+		{
+			name:        "one",
+			input:       "1",
+			shouldPanic: false,
+		},
+		{
+			name:        "negative one",
+			input:       "-1",
+			shouldPanic: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			value := i256.MustFromDecimal(tt.input)
+			if tt.shouldPanic {
+				uassert.PanicsWithMessage(t, cur, tt.errorMsg, func() {
+					checkOverFlowInt128(value)
+				})
+			} else {
+				uassert.NotPanics(t, cur, func() {
+					checkOverFlowInt128(value)
+				})
+			}
+		})
+	}
+}
+
+func TestCheckTickSpacing(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		tick        int32
+		tickSpacing int32
+		shouldPanic bool
+		errorMsg    string
+	}{
+		{
+			name:        "Valid tick - divisible by tickSpacing",
+			tick:        120,
+			tickSpacing: 60,
+			shouldPanic: false,
+		},
+		{
+			name:        "Valid tick - zero tick",
+			tick:        0,
+			tickSpacing: 10,
+			shouldPanic: false,
+		},
+		{
+			name:        "Invalid tick - not divisible",
+			tick:        15,
+			tickSpacing: 10,
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-017] invalid tick and tick spacing requested || tick(15) MOD tickSpacing(10) != 0(5)",
+		},
+		{
+			name:        "Invalid tick - negative tick",
+			tick:        -35,
+			tickSpacing: 20,
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-017] invalid tick and tick spacing requested || tick(-35) MOD tickSpacing(20) != 0(-15)",
+		},
+		// Edge cases with extreme tick values
+		{
+			name:        "min tick boundary",
+			tick:        MIN_TICK, // -887272
+			tickSpacing: 1,
+			shouldPanic: false,
+		},
+		{
+			name:        "max tick boundary",
+			tick:        MAX_TICK, // 887272
+			tickSpacing: 1,
+			shouldPanic: false,
+		},
+		{
+			name:        "large tick spacing",
+			tick:        600,
+			tickSpacing: 200,
+			shouldPanic: false,
+		},
+		{
+			name:        "negative tick valid spacing",
+			tick:        -600,
+			tickSpacing: 200,
+			shouldPanic: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					if !tt.shouldPanic {
+						t.Errorf("Unexpected panic: %v", r)
+					}
+				} else if tt.shouldPanic {
+					t.Errorf("Expected panic but none occurred")
+				}
+			}()
+			checkTickSpacing(tt.tick, tt.tickSpacing)
+		})
+	}
+}
+
+func TestCheckTickSpacing_EdgeCases(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		tick        int32
+		tickSpacing int32
+		shouldPanic bool
+		errorMsg    string
+	}{
+		// Boundary values with tick spacing 1
+		{
+			name:        "MIN_TICK with spacing 1",
+			tick:        MIN_TICK,
+			tickSpacing: 1,
+			shouldPanic: false,
+		},
+		{
+			name:        "MAX_TICK with spacing 1",
+			tick:        MAX_TICK,
+			tickSpacing: 1,
+			shouldPanic: false,
+		},
+		// Fee tier tick spacings
+		{
+			name:        "fee tier 100 - valid tick",
+			tick:        12345,
+			tickSpacing: 1,
+			shouldPanic: false,
+		},
+		{
+			name:        "fee tier 500 - valid tick",
+			tick:        12340,
+			tickSpacing: 10,
+			shouldPanic: false,
+		},
+		{
+			name:        "fee tier 500 - invalid tick",
+			tick:        12345,
+			tickSpacing: 10,
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-017] invalid tick and tick spacing requested || tick(12345) MOD tickSpacing(10) != 0(5)",
+		},
+		{
+			name:        "fee tier 3000 - valid tick",
+			tick:        -12360,
+			tickSpacing: 60,
+			shouldPanic: false,
+		},
+		{
+			name:        "fee tier 3000 - invalid tick",
+			tick:        -12359,
+			tickSpacing: 60,
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-017] invalid tick and tick spacing requested || tick(-12359) MOD tickSpacing(60) != 0(-59)",
+		},
+		{
+			name:        "fee tier 10000 - valid tick",
+			tick:        -12400,
+			tickSpacing: 200,
+			shouldPanic: false,
+		},
+		{
+			name:        "fee tier 10000 - invalid tick",
+			tick:        -12399,
+			tickSpacing: 200,
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-017] invalid tick and tick spacing requested || tick(-12399) MOD tickSpacing(200) != 0(-199)",
+		},
+		// Extreme boundary cases
+		{
+			name:        "near MIN_TICK aligned",
+			tick:        -887200,
+			tickSpacing: 100,
+			shouldPanic: false,
+		},
+		{
+			name:        "near MIN_TICK not aligned",
+			tick:        -887271,
+			tickSpacing: 100,
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-017] invalid tick and tick spacing requested || tick(-887271) MOD tickSpacing(100) != 0(-71)",
+		},
+		{
+			name:        "maximum tick spacing",
+			tick:        0,
+			tickSpacing: 887272,
+			shouldPanic: false,
+		},
+		{
+			name:        "maximum tick spacing not aligned",
+			tick:        1,
+			tickSpacing: 887272,
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-017] invalid tick and tick spacing requested || tick(1) MOD tickSpacing(887272) != 0(1)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			if tt.shouldPanic {
+				uassert.PanicsWithMessage(t, cur, tt.errorMsg, func() {
+					checkTickSpacing(tt.tick, tt.tickSpacing)
+				})
+			} else {
+				uassert.NotPanics(t, cur, func() {
+					checkTickSpacing(tt.tick, tt.tickSpacing)
+				})
+			}
+		})
+	}
+}
+
+// Additional edge case tests for better coverage
+func TestConversionBoundaryValues(cur realm, t *testing.T) {
+	t.Run("int64 power of 2 boundary", func(cur realm, t *testing.T) {
+		pow63 := u256.NewUint(1 << 63) // 9,223,372,036,854,775,808
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("expected panic for 2^63, but none occurred")
+			}
+		}()
+		gnsmath.SafeConvertToInt64(pow63)
+	})
+
+	t.Run("edge case q values", func(cur realm, t *testing.T) {
+		// Q96 should work with int128
+		q96 := u256.MustFromDecimal(Q96)
+		result := gnsmath.SafeConvertToInt128(q96)
+		uassert.Equal(t, Q96, result.ToString())
+
+		// Q128 is actually 2^128 which is larger than MAX_INT128 (2^127 - 1)
+		// So it should panic
+		q128Val := u256.MustFromDecimal(Q128)
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("expected panic for Q128 value, but none occurred")
+			}
+		}()
+		gnsmath.SafeConvertToInt128(q128Val)
+	})
+}
+
+func TestSafeConversions_ExactBoundaries(cur realm, t *testing.T) {
+	t.Run("int64 exact boundary", func(cur realm, t *testing.T) {
+		// MAX_INT64
+		maxValue := u256.MustFromDecimal(MAX_INT64)
+		result := gnsmath.SafeConvertToInt64(maxValue)
+		uassert.Equal(t, INT64_MAX, result)
+
+		// MAX_INT64 + 1
+		overValue := new(u256.Uint).Add(maxValue, u256.One())
+		uassert.PanicsWithMessage(t, cur,
+			"amount(9223372036854775808) overflows int64 range (max: 9223372036854775807)",
+			func() { gnsmath.SafeConvertToInt64(overValue) })
+	})
+
+	t.Run("int128 exact boundary", func(cur realm, t *testing.T) {
+		// MAX_INT128
+		maxValue := u256.MustFromDecimal(MAX_INT128)
+		result := gnsmath.SafeConvertToInt128(maxValue)
+		uassert.Equal(t, MAX_INT128, result.ToString())
+
+		// MAX_INT128 + 1
+		overValue := new(u256.Uint).Add(maxValue, u256.One())
+		uassert.PanicsWithMessage(t, cur,
+			"amount(170141183460469231731687303715884105728) overflows int128 range",
+			func() { gnsmath.SafeConvertToInt128(overValue) })
+	})
+}
+
+// TestToUint128 tests the toUint128 function with edge cases
+func TestToUint128(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		input       *u256.Uint
+		expected    string
+		shouldPanic bool
+		errorMsg    string
+	}{
+		{
+			name:        "nil value panics",
+			input:       nil,
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-004] invalid input data || value is nil",
+		},
+		{
+			name:        "zero value",
+			input:       u256.Zero(),
+			expected:    "0",
+			shouldPanic: false,
+		},
+		{
+			name:        "one value",
+			input:       u256.One(),
+			expected:    "1",
+			shouldPanic: false,
+		},
+		{
+			name:        "max uint128",
+			input:       u256.MustFromDecimal(MAX_UINT128),
+			expected:    MAX_UINT128,
+			shouldPanic: false,
+		},
+		{
+			name:        "max uint128 + 1 gets masked",
+			input:       new(u256.Uint).Add(u256.MustFromDecimal(MAX_UINT128), u256.One()),
+			expected:    "0", // wraps around due to masking
+			shouldPanic: false,
+		},
+		{
+			name:        "large value gets masked",
+			input:       u256.MustFromDecimal("340282366920938463463374607431768211456"), // 2^128
+			expected:    "0",                                                             // wraps to 0
+			shouldPanic: false,
+		},
+		{
+			name:        "Q96 value",
+			input:       u256.MustFromDecimal(Q96),
+			expected:    Q96,
+			shouldPanic: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			if tt.shouldPanic {
+				uassert.PanicsWithMessage(t, cur, tt.errorMsg, func() {
+					toUint128(tt.input)
+				})
+			} else {
+				result := toUint128(tt.input)
+				uassert.Equal(t, tt.expected, result.ToString())
+			}
+		})
+	}
+}
+
+// TestCheckOverFlowInt128 tests overflow detection for int128
+func TestCheckOverFlowInt128(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		input       *i256.Int
+		shouldPanic bool
+		errorMsg    string
+	}{
+		{
+			name:        "zero value",
+			input:       i256.Zero(),
+			shouldPanic: false,
+		},
+		{
+			name:        "positive value within range",
+			input:       i256.MustFromDecimal("1000000000000000000"),
+			shouldPanic: false,
+		},
+		{
+			name:        "max int128",
+			input:       i256.MustFromDecimal(MAX_INT128),
+			shouldPanic: false,
+		},
+		{
+			name:        "max int128 + 1",
+			input:       new(i256.Int).Add(i256.MustFromDecimal(MAX_INT128), i256.One()),
+			shouldPanic: true,
+			errorMsg:    "[GNOSWAP-POOL-020] overflow: amount(170141183460469231731687303715884105728) overflows int128 range",
+		},
+		{
+			name:        "very large value",
+			input:       i256.MustFromDecimal("999999999999999999999999999999999999999"),
+			shouldPanic: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			if tt.shouldPanic {
+				defer func() {
+					if r := recover(); r == nil {
+						t.Error("Expected panic but none occurred")
+					}
+				}()
+				checkOverFlowInt128(tt.input)
+			} else {
+				uassert.NotPanics(t, cur, func() {
+					checkOverFlowInt128(tt.input)
+				})
+			}
+		})
+	}
+}
+
+// TestU256Min_EdgeCases tests the u256Min utility function
+func TestU256Min_EdgeCases(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		a           *u256.Uint
+		b           *u256.Uint
+		expected    *u256.Uint
+		description string
+	}{
+		{
+			name:        "both zero",
+			a:           u256.Zero(),
+			b:           u256.Zero(),
+			expected:    u256.Zero(),
+			description: "Min of two zeros should be zero",
+		},
+		{
+			name:        "first zero",
+			a:           u256.Zero(),
+			b:           u256.NewUint(100),
+			expected:    u256.Zero(),
+			description: "Min of zero and non-zero should be zero",
+		},
+		{
+			name:        "second zero",
+			a:           u256.NewUint(100),
+			b:           u256.Zero(),
+			expected:    u256.Zero(),
+			description: "Min of non-zero and zero should be zero",
+		},
+		{
+			name:        "equal values",
+			a:           u256.NewUint(1000),
+			b:           u256.NewUint(1000),
+			expected:    u256.NewUint(1000),
+			description: "Min of equal values should return that value",
+		},
+		{
+			name:        "first smaller",
+			a:           u256.NewUint(500),
+			b:           u256.NewUint(1000),
+			expected:    u256.NewUint(500),
+			description: "Min should return first when it's smaller",
+		},
+		{
+			name:        "second smaller",
+			a:           u256.NewUint(1000),
+			b:           u256.NewUint(500),
+			expected:    u256.NewUint(500),
+			description: "Min should return second when it's smaller",
+		},
+		{
+			name:        "one unit difference",
+			a:           u256.NewUint(1000),
+			b:           u256.NewUint(1001),
+			expected:    u256.NewUint(1000),
+			description: "Should correctly handle one unit difference",
+		},
+		{
+			name:        "max uint128 vs smaller",
+			a:           u256.MustFromDecimal(MAX_UINT128),
+			b:           u256.NewUint(1000),
+			expected:    u256.NewUint(1000),
+			description: "Min of MAX_UINT128 and smaller value should be smaller value",
+		},
+		{
+			name:        "both max uint128",
+			a:           u256.MustFromDecimal(MAX_UINT128),
+			b:           u256.MustFromDecimal(MAX_UINT128),
+			expected:    u256.MustFromDecimal(MAX_UINT128),
+			description: "Min of two MAX_UINT128 should be MAX_UINT128",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			result := u256Min(tt.a, tt.b)
+			uassert.Equal(t, tt.expected.ToString(), result.ToString(), tt.description)
+		})
+	}
+}
+
+func TestIterateTicksBoundary(cur realm, t *testing.T) {
+	tests := []struct {
+		name          string
+		setupTicks    []int32
+		startTick     int32
+		endTick       int32
+		expectedTicks []int32
+		description   string
+	}{
+		{
+			name:          "single tick - startTick equals endTick",
+			setupTicks:    []int32{-100, 0, 100},
+			startTick:     0,
+			endTick:       0,
+			expectedTicks: []int32{0},
+			description:   "When startTick == endTick, should return only that tick",
+		},
+		{
+			name:          "endTick is inclusive",
+			setupTicks:    []int32{0, 10, 20, 30},
+			startTick:     0,
+			endTick:       20,
+			expectedTicks: []int32{0, 10, 20},
+			description:   "endTick should be included in the result",
+		},
+		{
+			name:          "startTick is inclusive",
+			setupTicks:    []int32{0, 10, 20, 30},
+			startTick:     10,
+			endTick:       30,
+			expectedTicks: []int32{10, 20, 30},
+			description:   "startTick should be included in the result",
+		},
+		{
+			name:          "no ticks in range",
+			setupTicks:    []int32{-100, 100},
+			startTick:     -50,
+			endTick:       50,
+			expectedTicks: []int32{},
+			description:   "Range with no ticks should return empty",
+		},
+		{
+			name:          "startTick greater than endTick",
+			setupTicks:    []int32{0, 10, 20},
+			startTick:     20,
+			endTick:       0,
+			expectedTicks: []int32{},
+			description:   "Reversed range should return empty (not swap)",
+		},
+		{
+			name:          "negative ticks range",
+			setupTicks:    []int32{-100, -50, -20, -10},
+			startTick:     -100,
+			endTick:       -10,
+			expectedTicks: []int32{-100, -50, -20, -10},
+			description:   "Negative ticks should be in numeric order",
+		},
+		{
+			name:          "across zero boundary",
+			setupTicks:    []int32{-20, -10, 0, 10, 20},
+			startTick:     -10,
+			endTick:       10,
+			expectedTicks: []int32{-10, 0, 10},
+			description:   "Range crossing zero should work correctly",
+		},
+		{
+			name:          "MIN_TICK boundary",
+			setupTicks:    []int32{-887270, -887260, -887250},
+			startTick:     -887270,
+			endTick:       -887250,
+			expectedTicks: []int32{-887270, -887260, -887250},
+			description:   "Should handle MIN_TICK region correctly",
+		},
+		{
+			name:          "MAX_TICK boundary",
+			setupTicks:    []int32{887250, 887260, 887270},
+			startTick:     887250,
+			endTick:       887270,
+			expectedTicks: []int32{887250, 887260, 887270},
+			description:   "Should handle MAX_TICK region correctly (inclusive)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			initPoolTest(cur, t)
+			tickSpacing := getMockInstance().GetFeeAmountTickSpacing(fee500)
+			poolParams := newPoolParams(fooPath, barPath, fee500, "79228162514264337593543950336", tickSpacing, 0)
+			pool := newPool(poolParams)
+
+			// Setup ticks by creating positions
+			for i, tick := range tt.setupTicks {
+				var tickLower, tickUpper int32
+				if i < len(tt.setupTicks)-1 {
+					tickLower = tick
+					tickUpper = tt.setupTicks[i+1]
+				} else {
+					// Last tick: create a small range
+					tickLower = tick - tickSpacing
+					tickUpper = tick
+				}
+
+				params := ModifyPositionParams{
+					owner:          addr01,
+					tickLower:      tickLower,
+					tickUpper:      tickUpper,
+					liquidityDelta: i256.MustFromDecimal("1000000"),
+				}
+				_, _, _, err := modifyPosition(pool, params)
+				if err != nil {
+					t.Logf("Warning: Failed to create position for tick %d: %v", tick, err)
+				}
+			}
+
+			// Iterate ticks
+			actualTicks := []int32{}
+			pool.IterateTicks(tt.startTick, tt.endTick, func(tick int32, _ pl.TickInfo) bool {
+				actualTicks = append(actualTicks, tick)
+				return false
+			})
+
+			// Verify results
+			if len(tt.expectedTicks) != len(actualTicks) {
+				t.Errorf("%s\nExpected %d ticks: %v\nGot %d ticks: %v",
+					tt.description,
+					len(tt.expectedTicks), tt.expectedTicks,
+					len(actualTicks), actualTicks)
+				return
+			}
+
+			for i, expectedTick := range tt.expectedTicks {
+				if actualTicks[i] != expectedTick {
+					t.Errorf("%s\nAt index %d: expected tick %d, got %d",
+						tt.description, i, expectedTick, actualTicks[i])
+				}
+			}
+
+			t.Logf("✓ %s", tt.description)
+			t.Logf("  Range: [%d, %d], Result: %v", tt.startTick, tt.endTick, actualTicks)
+		})
+	}
+}

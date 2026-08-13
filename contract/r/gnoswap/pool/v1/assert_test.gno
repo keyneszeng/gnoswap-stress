@@ -1,0 +1,232 @@
+package pool
+
+import (
+	"chain/runtime"
+	"testing"
+
+	uassert "gno.land/p/nt/uassert/v0"
+)
+
+func TestAssertIsNotUserCall(cur realm, t *testing.T) {
+	tests := []struct {
+		name         string
+		currentRealm runtime.Realm
+		shouldPanic  bool
+		panicMsg     string
+	}{
+		{
+			name:         "success - called from realm (not EOA)",
+			currentRealm: testing.NewCodeRealm("gno.land/r/gnoswap/pool/v1"),
+			shouldPanic:  false,
+		},
+		{
+			name:         "fail - called from EOA",
+			currentRealm: testing.NewUserRealm(adminAddr),
+			shouldPanic:  true,
+			panicMsg:     "[GNOSWAP-POOL-022] not access EOA || previousRealm(g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5) is EOA",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			testing.SetRealm(tt.currentRealm)
+
+			if tt.shouldPanic {
+				testing.SetRealm(tt.currentRealm)
+				uassert.AbortsWithMessage(t, cur, tt.panicMsg, func(cur realm) {
+					assertIsNotUserCall(0, cur)
+				})
+			} else {
+				assertIsNotUserCall(0, cur)
+			}
+		})
+	}
+}
+
+func TestAssertIsNotEqualsTokens(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		token0Path  string
+		token1Path  string
+		shouldPanic bool
+		panicMsg    string
+	}{
+		{
+			name:        "success - different tokens",
+			token0Path:  barPath,
+			token1Path:  fooPath,
+			shouldPanic: false,
+		},
+		{
+			name:        "fail - same tokens",
+			token0Path:  barPath,
+			token1Path:  barPath,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-POOL-008] same token used in single pool || expected token0Path(gno.land/r/onbloc/bar.BAR) != token1Path(gno.land/r/onbloc/bar.BAR)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			if tt.shouldPanic {
+				uassert.PanicsWithMessage(t, cur, tt.panicMsg, func() {
+					assertIsNotEqualsTokens(tt.token0Path, tt.token1Path)
+				})
+			} else {
+				assertIsNotEqualsTokens(tt.token0Path, tt.token1Path)
+			}
+		})
+	}
+}
+
+func TestAssertIsSupportedFeeTier(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		fee         uint32
+		shouldPanic bool
+		panicMsg    string
+	}{
+		{
+			name:        "success - fee tier 100",
+			fee:         100,
+			shouldPanic: false,
+		},
+		{
+			name:        "success - fee tier 500",
+			fee:         500,
+			shouldPanic: false,
+		},
+		{
+			name:        "success - fee tier 3000",
+			fee:         3000,
+			shouldPanic: false,
+		},
+		{
+			name:        "success - fee tier 10000",
+			fee:         10000,
+			shouldPanic: false,
+		},
+		{
+			name:        "fail - unsupported fee tier 1000",
+			fee:         1000,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-POOL-001] unsupported fee tier || expected fee(1000) to be one of 100, 500, 3000, 10000",
+		},
+		{
+			name:        "fail - unsupported fee tier 0",
+			fee:         0,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-POOL-001] unsupported fee tier || expected fee(0) to be one of 100, 500, 3000, 10000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			if tt.shouldPanic {
+				uassert.PanicsWithMessage(t, cur, tt.panicMsg, func() {
+					assertIsSupportedFeeTier(tt.fee)
+				})
+			} else {
+				assertIsSupportedFeeTier(tt.fee)
+			}
+		})
+	}
+}
+
+func TestAssertIsNotExistsPoolPath(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		setupFn     func(cur realm, t *testing.T)
+		token0Path  string
+		token1Path  string
+		fee         uint32
+		shouldPanic bool
+		panicMsg    string
+	}{
+		{
+			name: "success - pool does not exist",
+			setupFn: func(cur realm, t *testing.T) {
+				initPoolTest(cur, t)
+			},
+			token0Path:  barPath,
+			token1Path:  fooPath,
+			fee:         fee3000,
+			shouldPanic: false,
+		},
+		{
+			name: "fail - pool already exists",
+			setupFn: func(cur realm, t *testing.T) {
+				initPoolTest(cur, t)
+				testing.SetRealm(testing.NewUserRealm(adminAddr))
+				mockInstanceSetPoolCreationFee(0, cur, 0)
+
+				testing.SetRealm(testing.NewUserRealm(adminAddr))
+				mockInstanceCreatePool(0, cur, barPath, fooPath, fee3000, "4295128740")
+			},
+			token0Path:  barPath,
+			token1Path:  fooPath,
+			fee:         fee3000,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-POOL-002] pool already created || expected poolPath(gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/foo.FOO:3000) not to exist",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			if tt.setupFn != nil {
+				tt.setupFn(cur, t)
+			}
+
+			if tt.shouldPanic {
+				uassert.PanicsWithMessage(t, cur, tt.panicMsg, func() {
+					assertIsNotExistsPoolPath(getMockInstance(), tt.token0Path, tt.token1Path, tt.fee)
+				})
+			} else {
+				assertIsNotExistsPoolPath(getMockInstance(), tt.token0Path, tt.token1Path, tt.fee)
+			}
+		})
+	}
+}
+
+func TestAssertIsValidTokenOrder(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		token0Path  string
+		token1Path  string
+		shouldPanic bool
+		panicMsg    string
+	}{
+		{
+			name:        "success - tokens in correct order",
+			token0Path:  barPath,
+			token1Path:  fooPath,
+			shouldPanic: false,
+		},
+		{
+			name:        "fail - tokens not in order (equal)",
+			token0Path:  barPath,
+			token1Path:  barPath,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-POOL-004] invalid input data || expected token0Path(gno.land/r/onbloc/bar.BAR) < token1Path(gno.land/r/onbloc/bar.BAR)",
+		},
+		{
+			name:        "fail - tokens in reverse order",
+			token0Path:  fooPath,
+			token1Path:  barPath,
+			shouldPanic: true,
+			panicMsg:    "[GNOSWAP-POOL-004] invalid input data || expected token0Path(gno.land/r/onbloc/foo.FOO) < token1Path(gno.land/r/onbloc/bar.BAR)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			if tt.shouldPanic {
+				uassert.PanicsWithMessage(t, cur, tt.panicMsg, func() {
+					assertIsValidTokenOrder(tt.token0Path, tt.token1Path)
+				})
+			} else {
+				assertIsValidTokenOrder(tt.token0Path, tt.token1Path)
+			}
+		})
+	}
+}

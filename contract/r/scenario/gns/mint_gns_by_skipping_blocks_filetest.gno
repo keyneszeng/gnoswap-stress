@@ -1,0 +1,74 @@
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+// mint gns by skipping blocks
+package main
+
+import (
+	"testing"
+	"time"
+
+	"gno.land/r/gnoswap/scenarioutils"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	"gno.land/r/gnoswap/emission"
+	"gno.land/r/gnoswap/gns"
+
+	_ "gno.land/r/gnoswap/staker"
+
+	"gno.land/r/gnoswap/access"
+)
+
+var t *testing.T
+
+var (
+	user01Addr  = testutils.TestAddress("user01Addr")
+	user01Realm = testing.NewUserRealm(user01Addr)
+
+	adminAddr, _ = access.GetAddress(prbac.ROLE_ADMIN.String())
+)
+
+func main(cur realm) {
+	ufmt.Println("[SCENARIO] 1. Initialize emission callback")
+	initEmissionCallback(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 2. Mint GNS when initialized")
+	mintGNS(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 3. Skip 50 blocks")
+	testing.SkipHeights(50)
+	println()
+
+	ufmt.Println("[SCENARIO] 4. Mint GNS when skipped 50 blocks")
+	mintGNS(cur)
+}
+
+func initEmissionCallback(cur realm) {
+	testing.SetOriginCaller(adminAddr)
+	scenarioutils.EnsureCanonicalDefaultPool(cross(cur))
+	emission.SetDistributionStartTime(cross(cur), time.Now().Unix()+1)
+	testing.SkipHeights(1)
+}
+
+func mintGNS(cur realm) {
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/gnoswap/emission"))
+
+	mintedAmount := gns.MintGns(cross(cur), user01Addr)
+
+	ufmt.Printf("[EXPECTED] minted amount should be %d\n", mintedAmount)
+}
+
+// Output:
+// [SCENARIO] 1. Initialize emission callback
+//
+// [SCENARIO] 2. Mint GNS when initialized
+// [EXPECTED] minted amount should be 35673515
+//
+// [SCENARIO] 3. Skip 50 blocks
+//
+// [SCENARIO] 4. Mint GNS when skipped 50 blocks
+// [EXPECTED] minted amount should be 1783675750

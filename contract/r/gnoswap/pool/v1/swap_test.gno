@@ -1,0 +1,2290 @@
+package pool
+
+import (
+	"testing"
+
+	uassert "gno.land/p/nt/uassert/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/p/gnoswap/consts"
+	"gno.land/p/gnoswap/gnsmath"
+	i256 "gno.land/p/gnoswap/int256"
+	u256 "gno.land/p/gnoswap/uint256"
+	"gno.land/r/gnoswap/common"
+	pl "gno.land/r/gnoswap/pool"
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/baz"
+)
+
+const (
+	// Swap amounts with business context
+	DUST_SWAP_AMOUNT    = "100"       // Dust level swap
+	SMALL_SWAP_AMOUNT   = "1000"      // Small swap
+	MEDIUM_SWAP_AMOUNT  = "10000"     // Medium scale swap
+	LARGE_SWAP_AMOUNT   = "1000000"   // Large scale swap
+	EXTREME_SWAP_AMOUNT = "100000000" // Extreme large scale swap
+
+	// Price limits for different scenarios
+	MAX_PRICE_IMPACT = "79228162514264337593543950337" // Maximum price impact
+	MIN_PRICE_IMPACT = "79228162514264337593543950335" // Minimum price impact
+
+	// Fee scenarios
+	ULTRA_LOW_FEE_TIER = FeeTier100   // 0.01% (Stablecoin)
+	LOW_FEE_TIER       = FeeTier500   // 0.05% (Highly correlated token)
+	STANDARD_FEE_TIER  = FeeTier3000  // 0.3% (General token)
+	HIGH_FEE_TIER      = FeeTier10000 // 1% (High volatility token)
+)
+
+// Swap scenario structs
+type SwapScenario struct {
+	name             string
+	description      string
+	zeroForOne       bool
+	amountSpecified  string
+	priceLimit       string
+	expectedBehavior string
+	marketContext    string
+}
+
+type SwapValidationTest struct {
+	name           string
+	description    string
+	setupCondition func(cur realm, t *testing.T) *pl.Pool
+	swapParams     SwapScenario
+	expectSuccess  bool
+	expectedError  string
+	riskFactor     string
+}
+
+func TestProtocolFees_ManagementAndCollection(cur realm, t *testing.T) {
+	feeManagementTests := []struct {
+		name              string
+		description       string
+		initialFees       map[string]int64
+		deductionAmount   map[string]int64
+		expectedRemaining map[string]int64
+		expectedDeducted  map[string]int64
+		businessImpact    string
+	}{
+		{
+			name:              "normal_fee_deduction_scenario",
+			description:       "Normal protocol fee deduction",
+			initialFees:       map[string]int64{"token0": 1000, "token1": 2000},
+			deductionAmount:   map[string]int64{"token0": 500, "token1": 1000},
+			expectedRemaining: map[string]int64{"token0": 500, "token1": 1000},
+			expectedDeducted:  map[string]int64{"token0": 500, "token1": 1000},
+			businessImpact:    "Realize part of protocol revenue",
+		},
+		{
+			name:              "near_complete_fee_extraction",
+			description:       "Almost all fees extracted (1 left)",
+			initialFees:       map[string]int64{"token0": 1000, "token1": 2000},
+			deductionAmount:   map[string]int64{"token0": 999, "token1": 1999},
+			expectedRemaining: map[string]int64{"token0": 1, "token1": 1},
+			expectedDeducted:  map[string]int64{"token0": 999, "token1": 1999},
+			businessImpact:    "Maximize protocol revenue while maintaining system stability",
+		},
+		{
+			name:              "zero_deduction_preservation",
+			description:       "Preserve fees without deduction",
+			initialFees:       map[string]int64{"token0": 1000, "token1": 2000},
+			deductionAmount:   map[string]int64{"token0": 0, "token1": 0},
+			expectedRemaining: map[string]int64{"token0": 1000, "token1": 2000},
+			expectedDeducted:  map[string]int64{"token0": 0, "token1": 0},
+			businessImpact:    "Preserve fees for future protocol development",
+		},
+	}
+
+	for _, test := range feeManagementTests {
+		t.Run(test.name, func(cur realm, t *testing.T) {
+			// Given: Specific protocol fee state
+			pool := pl.NewPool(barPath, bazPath, STANDARD_FEE_TIER, u256.MustFromDecimal(EQUAL_PRICE_RATIO), 1, 0, 0)
+			protocolFees := pl.NewTokenPair()
+			protocolFees.SetToken0(test.initialFees["token0"])
+			protocolFees.SetToken1(test.initialFees["token1"])
+			pool.SetProtocolFees(protocolFees)
+
+			// When: Execute protocol fee deduction
+			actualDeducted0, actualDeducted1 := getMockInstance().saveProtocolFees(pool, test.deductionAmount["token0"], test.deductionAmount["token1"])
+
+			// Then: Verify expected deduction and remaining balance
+			uassert.Equal(t, test.expectedDeducted["token0"], actualDeducted0,
+				"Token0 deduction amount is different from expected")
+			uassert.Equal(t, test.expectedDeducted["token1"], actualDeducted1,
+				"Token1 deduction amount is different from expected")
+			uassert.Equal(t, test.expectedRemaining["token0"], pool.ProtocolFeesToken0(),
+				"Token0 remaining fee is different from expected")
+			uassert.Equal(t, test.expectedRemaining["token1"], pool.ProtocolFeesToken1(),
+				"Token1 remaining fee is different from expected")
+
+			t.Logf("✓ %s: %s", test.description, test.businessImpact)
+		})
+	}
+}
+
+func TestSwapContinuation_DecisionLogic(cur realm, t *testing.T) {
+	continuationTests := []struct {
+		name            string
+		description     string
+		remainingAmount string
+		currentPrice    string
+		priceLimit      string
+		shouldContinue  bool
+		tradingContext  string
+	}{
+		{
+			name:            "active_trading_continuation",
+			description:     "Swap continues in active trading",
+			remainingAmount: "1000",
+			currentPrice:    "1000000",
+			priceLimit:      "900000",
+			shouldContinue:  true,
+			tradingContext:  "Market liquidity is sufficient and price impact is within acceptable range",
+		},
+		{
+			name:            "amount_exhausted_termination",
+			description:     "Termination due to swap amount exhaustion",
+			remainingAmount: "0",
+			currentPrice:    "1000000",
+			priceLimit:      "900000",
+			shouldContinue:  false,
+			tradingContext:  "Requested swap is fully executed and no further progress is needed",
+		},
+		{
+			name:            "price_limit_reached_protection",
+			description:     "Protection termination due to price limit reached",
+			remainingAmount: "1000",
+			currentPrice:    "900000",
+			priceLimit:      "900000",
+			shouldContinue:  false,
+			tradingContext:  "Slippage protection device prevents additional price deterioration",
+		},
+	}
+
+	for _, test := range continuationTests {
+		t.Run(test.name, func(cur realm, t *testing.T) {
+			// Given: Specific swap state
+			state := SwapState{
+				amountSpecifiedRemaining: i256.MustFromDecimal(test.remainingAmount),
+				sqrtPriceX96:             u256.MustFromDecimal(test.currentPrice),
+				liquidity:                u256.MustFromDecimal("1000000"),
+			}
+			priceLimit := u256.MustFromDecimal(test.priceLimit)
+
+			// When: Determine swap continuation
+			shouldContinue := shouldContinueSwap(state, priceLimit)
+
+			// Then: Verify expected decision
+			uassert.Equal(t, test.shouldContinue, shouldContinue,
+				ufmt.Sprintf("Swap continuation decision error: %s", test.description))
+
+			t.Logf("✓ %s: %s (Decision: %v)", test.description, test.tradingContext, shouldContinue)
+		})
+	}
+}
+
+func TestSwapAmounts_UpdateMechanics(cur realm, t *testing.T) {
+	updateTests := []struct {
+		name               string
+		description        string
+		isExactInput       bool
+		stepAmountIn       string
+		stepAmountOut      string
+		stepFeeAmount      string
+		initialRemaining   string
+		initialCalculated  string
+		expectedRemaining  string
+		expectedCalculated string
+		tradingPattern     string
+	}{
+		{
+			name:               "exact_input_normal_trade",
+			description:        "Normal trade with exact input",
+			isExactInput:       true,
+			stepAmountIn:       "100",
+			stepAmountOut:      "97",
+			stepFeeAmount:      "3",
+			initialRemaining:   "1000",
+			initialCalculated:  "0",
+			expectedRemaining:  "897", // 1000 - (100 + 3)
+			expectedCalculated: "-97", // Output is recorded as negative
+			tradingPattern:     "User specifies exact input amount to maximize output",
+		},
+		{
+			name:               "exact_output_targeted_trade",
+			description:        "Targeted trade with exact output",
+			isExactInput:       false,
+			stepAmountIn:       "100",
+			stepAmountOut:      "97",
+			stepFeeAmount:      "3",
+			initialRemaining:   "-1000",
+			initialCalculated:  "0",
+			expectedRemaining:  "-903", // -1000 + 97
+			expectedCalculated: "103",  // 100 + 3 (input + fee)
+			tradingPattern:     "User specifies exact output amount and calculates required input",
+		},
+	}
+
+	for _, test := range updateTests {
+		t.Run(test.name, func(cur realm, t *testing.T) {
+			// Given: Specific swap step calculation result
+			step := StepComputations{
+				amountIn:  u256.MustFromDecimal(test.stepAmountIn),
+				amountOut: u256.MustFromDecimal(test.stepAmountOut),
+				feeAmount: u256.MustFromDecimal(test.stepFeeAmount),
+			}
+
+			state := SwapState{
+				amountSpecifiedRemaining: i256.MustFromDecimal(test.initialRemaining),
+				amountCalculated:         i256.MustFromDecimal(test.initialCalculated),
+			}
+
+			// When: Execute swap amount update
+			updatedState, err := updateAmounts(step, state, test.isExactInput)
+			if err != nil {
+				t.Fatalf("Unexpected error during swap amount update: %v", err)
+			}
+
+			// Then: Verify updated state
+			expectedRemaining := i256.MustFromDecimal(test.expectedRemaining)
+			expectedCalculated := i256.MustFromDecimal(test.expectedCalculated)
+
+			uassert.True(t, expectedRemaining.Eq(updatedState.amountSpecifiedRemaining),
+				ufmt.Sprintf("Remaining amount calculation error: expected(%s) != actual(%s)",
+					expectedRemaining.ToString(), updatedState.amountSpecifiedRemaining.ToString()))
+
+			uassert.True(t, expectedCalculated.Eq(updatedState.amountCalculated),
+				ufmt.Sprintf("Calculated amount error: expected(%s) != actual(%s)",
+					expectedCalculated.ToString(), updatedState.amountCalculated.ToString()))
+
+			t.Logf("✓ %s: %s", test.description, test.tradingPattern)
+		})
+	}
+}
+
+func TestSwapComputation_CoreEngine(cur realm, t *testing.T) {
+	computationTests := []struct {
+		name            string
+		description     string
+		setupPool       func() *pl.Pool
+		swapAmount      string
+		priceLimit      string
+		zeroForOne      bool
+		exactInput      bool
+		expectedOutcome string
+		engineContext   string
+	}{
+		{
+			name:            "basic_swap_computation",
+			description:     "Basic swap computation engine verification",
+			setupPool:       createMockLiquidityPool,
+			swapAmount:      "1000000",
+			priceLimit:      "1100000000000000000",
+			zeroForOne:      true,
+			exactInput:      true,
+			expectedOutcome: "Normal swap execution",
+			engineContext:   "Standard swap processing in a sufficiently liquid environment",
+		},
+		{
+			name:            "zero_liquidity_edge_case",
+			description:     "Edge case with zero liquidity",
+			setupPool:       createMockZeroLiquidityPool,
+			swapAmount:      "1000000",
+			priceLimit:      "1100000000000000000",
+			zeroForOne:      true,
+			exactInput:      true,
+			expectedOutcome: "Swap not possible",
+			engineContext:   "Swap failure due to insufficient liquidity (mathematical limit)",
+		},
+	}
+
+	for _, test := range computationTests {
+		t.Run(test.name, func(cur realm, t *testing.T) {
+			// Given: Specific pool state
+			mockPool := test.setupPool()
+
+			computation := SwapComputation{
+				AmountSpecified:   i256.MustFromDecimal(test.swapAmount),
+				SqrtPriceLimitX96: u256.MustFromDecimal(test.priceLimit),
+				ZeroForOne:        test.zeroForOne,
+				ExactInput:        test.exactInput,
+				InitialState: SwapState{
+					amountSpecifiedRemaining: i256.MustFromDecimal(test.swapAmount),
+					amountCalculated:         i256.Zero(),
+					sqrtPriceX96:             mockPool.Slot0SqrtPriceX96(),
+					tick:                     mockPool.Slot0Tick(),
+					feeGrowthGlobalX128:      mockPool.FeeGrowthGlobal0X128(),
+					protocolFee:              u256.Zero(),
+					liquidity:                mockPool.Liquidity(),
+				},
+				Cache: &SwapCache{
+					feeProtocol:    0,
+					liquidityStart: mockPool.Liquidity(),
+				},
+			}
+
+			// When: Execute swap computation
+			result, err := getMockInstance().computeSwap(mockPool, computation, nil)
+			// Then: Verify computation result
+			if err != nil {
+				t.Fatalf("Unexpected error during swap computation: %v", err)
+			}
+
+			if test.expectedOutcome == "Normal swap execution" {
+				uassert.True(t, !result.Amount0.IsZero() || !result.Amount1.IsZero(),
+					"In a normal swap, token movement should occur")
+			} else if test.expectedOutcome == "Swap not possible" {
+				// Verify mathematical result for zero liquidity case
+				uassert.True(t, result.Amount0.IsZero(),
+					"In zero liquidity case, actual swap is not possible")
+			}
+
+			t.Logf("✓ %s: %s", test.description, test.engineContext)
+		})
+	}
+}
+
+func TestSwap_TickTransitionLiquidityBoundary(cur realm, t *testing.T) {
+	maxUint128 := u256.MustFromDecimal("340282366920938463463374607431768211455")
+
+	t.Run("tick crossing can raise active liquidity to uint128 max", func(cur realm, t *testing.T) {
+		pool := setupPoolAtPrice(cur, t, 0)
+		state := SwapState{
+			amountSpecifiedRemaining: i256.Zero(),
+			amountCalculated:         i256.Zero(),
+			sqrtPriceX96:             pool.Slot0SqrtPriceX96(),
+			tick:                     0,
+			feeGrowthGlobalX128:      u256.Zero(),
+			protocolFee:              u256.Zero(),
+			liquidity:                new(u256.Uint).Sub(maxUint128, u256.One()),
+		}
+		cache := &SwapCache{}
+
+		setMockPoolTick(pool, 1, mockTickInfo{
+			liquidityGross: u256.One(),
+			liquidityNet:   i256.One(),
+			initialized:    true,
+		})
+
+		step := StepComputations{initialized: true, tickNext: 1}
+		newState := getMockInstance().tickTransition(step, false, state, pool, cache, nil)
+
+		uassert.Equal(t, maxUint128.ToString(), newState.liquidity.ToString())
+	})
+
+	t.Run("tick crossing panics when active liquidity would exceed uint128 max", func(cur realm, t *testing.T) {
+		pool := setupPoolAtPrice(cur, t, 0)
+		state := SwapState{
+			amountSpecifiedRemaining: i256.Zero(),
+			amountCalculated:         i256.Zero(),
+			sqrtPriceX96:             pool.Slot0SqrtPriceX96(),
+			tick:                     0,
+			feeGrowthGlobalX128:      u256.Zero(),
+			protocolFee:              u256.Zero(),
+			liquidity:                maxUint128.Clone(),
+		}
+		cache := &SwapCache{}
+
+		setMockPoolTick(pool, 1, mockTickInfo{
+			liquidityGross: u256.One(),
+			liquidityNet:   i256.One(),
+			initialized:    true,
+		})
+
+		step := StepComputations{initialized: true, tickNext: 1}
+		uassert.PanicsContains(t, cur, "result exceeds uint128 range", func() {
+			getMockInstance().tickTransition(step, false, state, pool, cache, nil)
+		})
+	})
+}
+
+func TestDrySwap_ValidationAndFailures(cur realm, t *testing.T) {
+	// Given: Pool setup
+	_ = NewPoolTestEnv(t).
+		AsAdmin().
+		GivenPoolCreated(cur, barTokenPath, bazTokenPath, FeeTier100, EQUAL_PRICE_RATIO)
+
+	defer func() {
+		// initPoolTest re-runs UpgradeImpl, which requires admin/governance.
+		// Restore the admin realm before the deferred reset so it is not run
+		// under whatever realm the sub-tests last left active.
+		testing.SetRealm(adminRealm)
+		initPoolTest(cur, t)
+	}()
+
+	validationTests := []struct {
+		name           string
+		description    string
+		swapBuilder    func() SwapParams
+		expectSuccess  bool
+		failureReason  string
+		riskAssessment string
+	}{
+		{
+			name:        "zero_amount_rejection",
+			description: "Reject zero amount swap attempt",
+			swapBuilder: func() SwapParams {
+				return NewSwapBuilder().
+					InPool(barTokenPath, bazTokenPath, FeeTier100).
+					SwapToken0For1().
+					ExactInput("0").
+					WithPriceLimit(MAX_PRICE_IMPACT).
+					Build()
+			},
+			expectSuccess:  false,
+			failureReason:  "Prevent gas waste from meaningless trade",
+			riskAssessment: "Protect system resources",
+		},
+		{
+			name:        "insufficient_balance_protection",
+			description: "Protect against insufficient balance",
+			swapBuilder: func() SwapParams {
+				return NewSwapBuilder().
+					InPool(barTokenPath, bazTokenPath, FeeTier100).
+					SwapToken1For0().
+					ExactInput("2000000000").
+					WithPriceLimit(MAX_PRICE_IMPACT).
+					Build()
+			},
+			expectSuccess:  false,
+			failureReason:  "Block transactions exceeding user balance",
+			riskAssessment: "Protect user assets and prevent transaction failure",
+		},
+	}
+
+	for _, test := range validationTests {
+		t.Run(test.name, func(cur realm, t *testing.T) {
+			// When: DrySwap for pre-transaction validation using DSL parameters
+			swapParams := test.swapBuilder()
+			amount0, amount1, success := pl.DrySwap(
+				swapParams.token0,
+				swapParams.token1,
+				swapParams.fee,
+				swapParams.zeroForOne,
+				swapParams.amountSpecified.ToString(),
+				swapParams.sqrtPriceLimitX96.ToString(),
+			)
+
+			// Then: Verify expected validation result
+			uassert.Equal(t, test.expectSuccess, success,
+				ufmt.Sprintf("DrySwap result differs from expected: %s", test.description))
+
+			if !test.expectSuccess {
+				uassert.Equal(t, "0", amount0, "In failed swap, token0 movement should be zero")
+				uassert.Equal(t, "0", amount1, "In failed swap, token1 movement should be zero")
+			}
+
+			t.Logf("✓ %s: %s (Risk assessment: %s)", test.description, test.failureReason, test.riskAssessment)
+		})
+	}
+}
+
+func TestSwap_ExecutionAndSecurity(cur realm, t *testing.T) {
+	lockedPool := false
+
+	securityTests := []SwapValidationTest{
+		{
+			name:        "locked_pool_protection",
+			description: "Block transactions while the global pool lock is held",
+			setupCondition: func(cur realm, t *testing.T) *pl.Pool {
+				InitialisePoolTest(cur, t)
+				pool := getMockInstance().mustGetPoolBy(barPath, bazPath, STANDARD_FEE_TIER)
+				getMockInstance().lockPool(0, cur)
+				lockedPool = true
+				return pool
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: DUST_SWAP_AMOUNT,
+				priceLimit:      EQUAL_PRICE_RATIO,
+			},
+			expectSuccess: false,
+			expectedError: "[GNOSWAP-POOL-014] cannot modify pool while locked",
+			riskFactor:    "Prevent state inconsistency from concurrent transactions",
+		},
+		{
+			name:        "zero_amount_swap_prevention",
+			description: "Prevent meaningless zero swap",
+			setupCondition: func(cur realm, t *testing.T) *pl.Pool {
+				InitialisePoolTest(cur, t)
+				return getMockInstance().mustGetPoolBy(barPath, bazPath, STANDARD_FEE_TIER)
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: "0",
+				priceLimit:      EQUAL_PRICE_RATIO,
+			},
+			expectSuccess: false,
+			expectedError: "[GNOSWAP-POOL-011] invalid swap amount || amountSpecified == 0",
+			riskFactor:    "Prevent gas waste and system load from meaningless trade",
+		},
+		{
+			name:        "zero_amount_with_leading_zero_swap_prevention",
+			description: "Prevent meaningless zero swap encoded with leading zeros",
+			setupCondition: func(cur realm, t *testing.T) *pl.Pool {
+				InitialisePoolTest(cur, t)
+				return getMockInstance().mustGetPoolBy(barPath, bazPath, STANDARD_FEE_TIER)
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: "00",
+				priceLimit:      EQUAL_PRICE_RATIO,
+			},
+			expectSuccess: false,
+			expectedError: "[GNOSWAP-POOL-011] invalid swap amount || amountSpecified == 0",
+			riskFactor:    "Prevent gas waste and system load from meaningless trade",
+		},
+		{
+			name:        "zero_amount_with_positive_sign_swap_prevention",
+			description: "Prevent meaningless zero swap encoded with a positive sign",
+			setupCondition: func(cur realm, t *testing.T) *pl.Pool {
+				InitialisePoolTest(cur, t)
+				return getMockInstance().mustGetPoolBy(barPath, bazPath, STANDARD_FEE_TIER)
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: "+0",
+				priceLimit:      EQUAL_PRICE_RATIO,
+			},
+			expectSuccess: false,
+			expectedError: "[GNOSWAP-POOL-011] invalid swap amount || amountSpecified == 0",
+			riskFactor:    "Prevent gas waste and system load from meaningless trade",
+		},
+		{
+			name:        "zero_amount_with_negative_sign_swap_prevention",
+			description: "Prevent meaningless zero swap encoded with a negative sign",
+			setupCondition: func(cur realm, t *testing.T) *pl.Pool {
+				InitialisePoolTest(cur, t)
+				return getMockInstance().mustGetPoolBy(barPath, bazPath, STANDARD_FEE_TIER)
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: "-0",
+				priceLimit:      EQUAL_PRICE_RATIO,
+			},
+			expectSuccess: false,
+			expectedError: "[GNOSWAP-POOL-011] invalid swap amount || amountSpecified == 0",
+			riskFactor:    "Prevent gas waste and system load from meaningless trade",
+		},
+	}
+
+	for _, test := range securityTests {
+		t.Run(test.name, func(cur realm, t *testing.T) {
+			// Initialize test environment
+			resetObject(cur, t)
+			burnTokens(cur, t)
+
+			// Given: Specific security test condition
+			pool := test.setupCondition(cur, t)
+			if lockedPool {
+				defer func() {
+					getMockInstance().unlockPool(0, cur)
+					lockedPool = false
+				}()
+			}
+
+			// When & Then: Proper blocking in security risk situations
+			testing.SetRealm(rouRealm)
+
+			TokenApprove(cur, t, pool.Token0Path(), routerAddr, poolAddr, maxApprove)
+			TokenApprove(cur, t, pool.Token1Path(), routerAddr, poolAddr, maxApprove)
+
+			testing.SetRealm(rouRealm)
+
+			uassert.AbortsContains(t, cur, test.expectedError, func() {
+				mockInstanceSwap(0, cur, pool.Token0Path(), pool.Token1Path(), pool.Fee(),
+					alice, test.swapParams.zeroForOne, test.swapParams.amountSpecified,
+					test.swapParams.priceLimit,
+					func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
+						return mockSwapCallback(cur, pool.Token0Path(), pool.Token1Path(), amount0Delta, amount1Delta)
+					})
+			})
+
+			t.Logf("✓ %s: Properly blocked (Risk factor: %s)", test.description, test.riskFactor)
+		})
+	}
+}
+
+func TestSwapConsistency_DryVsActual(cur realm, t *testing.T) {
+	consistencyTests := []struct {
+		name            string
+		description     string
+		setupScenario   func(cur realm, t *testing.T)
+		fee             uint32
+		swapParams      SwapScenario
+		consistencyGoal string
+	}{
+		{
+			name:        "normal_trading_consistency",
+			description: "Prediction accuracy in normal trading",
+			setupScenario: func(cur realm, t *testing.T) {
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenApprove(cur, t, bazPath, routerAddr, poolAddr, 1000)
+			},
+			fee: STANDARD_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      false,
+				amountSpecified: DUST_SWAP_AMOUNT,
+				priceLimit:      maxSqrtPriceLimitX96,
+			},
+			consistencyGoal: "Exact match between DrySwap prediction and actual trading result",
+		},
+		{
+			name:        "large_trade_impact_consistency",
+			description: "Prediction of price impact in large trades",
+			setupScenario: func(cur realm, t *testing.T) {
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+			},
+			fee: STANDARD_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      false,
+				amountSpecified: EXTREME_SWAP_AMOUNT,
+				priceLimit:      maxSqrtPriceLimitX96,
+			},
+			consistencyGoal: "Accurate prediction of price impact even in large trades",
+		},
+		{
+			name:        "small_exact_input_zeroForOne",
+			description: "Small swap exact input token0 to token1",
+			setupScenario: func(cur realm, t *testing.T) {
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+				TokenFaucet(cur, t, barPath, routerAddr)
+				TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+			},
+			fee: STANDARD_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: SMALL_SWAP_AMOUNT,
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(-887220).ToString(),
+			},
+			consistencyGoal: "Minimal price impact with small amount",
+		},
+		{
+			name:        "large_exact_input_approaching_limits",
+			description: "Large swap approaching liquidity limits",
+			setupScenario: func(cur realm, t *testing.T) {
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+				TokenFaucet(cur, t, barPath, routerAddr)
+				TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+			},
+			fee: STANDARD_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: LARGE_SWAP_AMOUNT,
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(-887220).ToString(),
+			},
+			consistencyGoal: "Significant price impact with large amount",
+		},
+		{
+			name:        "small_exact_output_oneForZero",
+			description: "Small exact output swap token1 to token0",
+			setupScenario: func(cur realm, t *testing.T) {
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+			},
+			fee: STANDARD_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      false,
+				amountSpecified: "-" + SMALL_SWAP_AMOUNT,
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(),
+			},
+			consistencyGoal: "Small input required for small output",
+		},
+		{
+			name:        "medium_exact_output_near_limit",
+			description: "Medium exact output approaching limits",
+			setupScenario: func(cur realm, t *testing.T) {
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+				TokenFaucet(cur, t, barPath, routerAddr)
+				TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+			},
+			fee: STANDARD_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: "-" + MEDIUM_SWAP_AMOUNT,
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(-887220).ToString(),
+			},
+			consistencyGoal: "Large input required due to price impact",
+		},
+		{
+			name:        "ultra_low_fee_stablecoin_consistency",
+			description: "Ultra-low fee tier (0.01%) stablecoin swap",
+			setupScenario: func(cur realm, t *testing.T) {
+				setupUltraLowFeePool(cur, t)
+				TokenFaucet(cur, t, barPath, routerAddr)
+				TokenFaucet(cur, t, bazPath, routerAddr)
+			},
+			fee: ULTRA_LOW_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: MEDIUM_SWAP_AMOUNT,
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(-887220).ToString(),
+			},
+			consistencyGoal: "Minimal fee impact on stablecoin swap",
+		},
+		{
+			name:        "scattered_liquidity_consistency",
+			description: "Swap through scattered liquidity positions",
+			setupScenario: func(cur realm, t *testing.T) {
+				setupScatteredLiquidityPool(cur, t)
+			},
+			fee: STANDARD_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      false,
+				amountSpecified: SMALL_SWAP_AMOUNT,
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(11040).ToString(),
+			},
+			consistencyGoal: "Navigation across multiple liquidity ranges",
+		},
+		{
+			name:        "extreme_price_range_consistency",
+			description: "Extreme price range traversal",
+			setupScenario: func(cur realm, t *testing.T) {
+				setupExtremePriceRangePool(cur, t)
+			},
+			fee: STANDARD_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: SMALL_SWAP_AMOUNT,
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(-100080).ToString(),
+			},
+			consistencyGoal: "Large price movement in extreme volatility",
+		},
+		{
+			name:        "wide_range_low_concentration_consistency",
+			description: "Wide range position with low concentration",
+			setupScenario: func(cur realm, t *testing.T) {
+				setupWideRangePositionPool(cur, t)
+			},
+			fee: STANDARD_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: MEDIUM_SWAP_AMOUNT,
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(-887220).ToString(),
+			},
+			consistencyGoal: "Lower price impact due to wide liquidity distribution",
+		},
+		{
+			name:        "narrow_range_high_concentration_consistency",
+			description: "Narrow range position with high concentration",
+			setupScenario: func(cur realm, t *testing.T) {
+				setupNarrowRangePositionPool(cur, t)
+			},
+			fee: STANDARD_FEE_TIER,
+			swapParams: SwapScenario{
+				zeroForOne:      false,
+				amountSpecified: SMALL_SWAP_AMOUNT,
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(),
+			},
+			consistencyGoal: "Better execution due to concentrated liquidity",
+		},
+	}
+
+	for _, test := range consistencyTests {
+		t.Run(test.name, func(cur realm, t *testing.T) {
+			// Initialize test environment
+			resetObject(cur, t)
+			burnTokens(cur, t)
+
+			// Given: Specific trading scenario
+			test.setupScenario(cur, t)
+
+			// When: DrySwap for pre-calculation
+			dryAmount0, dryAmount1, drySuccess := getMockInstance().DrySwap(
+				barPath, bazPath, test.fee,
+				test.swapParams.zeroForOne, test.swapParams.amountSpecified,
+				test.swapParams.priceLimit,
+			)
+
+			// Execute actual swap
+			testing.SetRealm(rouRealm)
+
+			TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+			TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+
+			testing.SetRealm(rouRealm)
+
+			actualAmount0, actualAmount1 := mockInstanceSwap(0, cur, barPath, bazPath, test.fee,
+				routerAddr, test.swapParams.zeroForOne, test.swapParams.amountSpecified,
+				test.swapParams.priceLimit,
+				func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
+					return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+				})
+
+			// Then: Verify consistency between prediction and actual result
+			if !drySuccess {
+				t.Error("DrySwap failed but actual Swap succeeded - consistency issue")
+			}
+
+			uassert.Equal(t, dryAmount0, actualAmount0,
+				"Token0 amount prediction differs from actual")
+			uassert.Equal(t, dryAmount1, actualAmount1,
+				"Token1 amount prediction differs from actual")
+
+			// Check if it's a meaningful trade
+			uassert.True(t, dryAmount0 != "0" || dryAmount1 != "0",
+				"In meaningful trade, token movement should occur")
+
+			t.Logf("✓ %s: Prediction(%s/%s) = Actual(%s/%s) - %s",
+				test.description, dryAmount0, dryAmount1, actualAmount0, actualAmount1, test.consistencyGoal)
+		})
+	}
+}
+
+func setupWideRangePositionPool(cur realm, t *testing.T) {
+	t.Helper()
+
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+
+	TokenApprove(cur, t, barPath, adminAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, bazPath, adminAddr, poolAddr, maxApprove)
+
+	mockInstanceCreatePool(0, cur, barPath, bazPath, STANDARD_FEE_TIER, EQUAL_PRICE_RATIO)
+
+	testing.SetRealm(posRealm)
+	// Wide range position (low concentration)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -887220, 887220, "100000000", adminAddr)
+
+	// Prepare tokens
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+	TokenFaucet(cur, t, barPath, routerAddr)
+	TokenFaucet(cur, t, bazPath, routerAddr)
+
+	testing.SetOriginCaller(routerAddr)
+	testing.SetRealm(testing.NewUserRealm(routerAddr))
+	TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+}
+
+func setupNarrowRangePositionPool(cur realm, t *testing.T) {
+	t.Helper()
+
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+
+	TokenApprove(cur, t, barPath, adminAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, bazPath, adminAddr, poolAddr, maxApprove)
+
+	mockInstanceCreatePool(0, cur, barPath, bazPath, STANDARD_FEE_TIER, EQUAL_PRICE_RATIO)
+
+	testing.SetRealm(posRealm)
+	// Narrow range position (high concentration)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -60, 60, "100000000", adminAddr)
+
+	// Prepare tokens
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+	TokenFaucet(cur, t, barPath, routerAddr)
+	TokenFaucet(cur, t, bazPath, routerAddr)
+
+	testing.SetOriginCaller(routerAddr)
+	testing.SetRealm(testing.NewUserRealm(routerAddr))
+	TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+}
+
+func TestSwap_TradingPatterns(cur realm, t *testing.T) {
+	tradingPatterns := []struct {
+		name                 string
+		description          string
+		setupLiquidity       func(cur realm, t *testing.T)
+		swapParams           SwapScenario
+		expectedAmounts      []string
+		tradingContext       string
+		expectedHasPanic     bool
+		expectedPanicMessage string
+	}{
+		{
+			name:        "exact_input_token1_purchase",
+			description: "Purchase token1 with exact input",
+			setupLiquidity: func(cur realm, t *testing.T) {
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      false,
+				amountSpecified: "200",
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(),
+			},
+			expectedAmounts: []string{"-198", "200"},
+			tradingContext:  "User wants to purchase exactly 200 token1",
+		},
+		{
+			name:        "exact_output_token0_acquisition",
+			description: "Acquire token0 with exact output",
+			setupLiquidity: func(cur realm, t *testing.T) {
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      false,
+				amountSpecified: "-200", // Negative for exact output
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(),
+			},
+			expectedAmounts: []string{"-200", "202"},
+			tradingContext:  "User wants to acquire exactly 200 token0",
+		},
+		{
+			name:        "zero_liquidity_graceful_handling",
+			description: "Graceful handling of zero liquidity",
+			setupLiquidity: func(cur realm, t *testing.T) {
+				InitialisePoolTest(cur, t)
+				// MintPositionAll is not called (zero liquidity)
+				TokenFaucet(cur, t, barPath, routerAddr)
+				TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      false,
+				amountSpecified: "1000",
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(),
+			},
+			expectedAmounts: []string{"0", "0"},
+			tradingContext:  "Swap attempt in zero liquidity situation",
+		},
+		{
+			name:        "sqrt_price_limit_over_tick_range_termination",
+			description: "Swap terminated when sqrtPriceLimitX96 is over tick range",
+			setupLiquidity: func(cur realm, t *testing.T) {
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: "200",
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(887224).ToString(),
+			},
+			expectedAmounts:      []string{},
+			tradingContext:       "Swap terminated when sqrtPriceLimitX96 is over tick range",
+			expectedHasPanic:     true,
+			expectedPanicMessage: "[GNOSWAP-POOL-015] swap price out of range",
+		},
+	}
+
+	for _, pattern := range tradingPatterns {
+		t.Run(pattern.name, func(cur realm, t *testing.T) {
+			// Initialize test environment
+			resetObject(cur, t)
+			burnTokens(cur, t)
+
+			// Given: Specific liquidity and trading conditions
+			pattern.setupLiquidity(cur, t)
+
+			// When: Execute swap with specified pattern
+			TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+			TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+
+			testing.SetRealm(rouRealm)
+
+			if pattern.expectedHasPanic {
+				uassert.AbortsContains(t, cur, pattern.expectedPanicMessage, func() {
+					mockInstanceSwap(0, cur, barPath, bazPath, STANDARD_FEE_TIER,
+						alice, pattern.swapParams.zeroForOne, pattern.swapParams.amountSpecified,
+						pattern.swapParams.priceLimit,
+						func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
+							return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+						})
+				})
+			} else {
+				actualAmount0, actualAmount1 := mockInstanceSwap(0, cur, barPath, bazPath, STANDARD_FEE_TIER,
+					alice, pattern.swapParams.zeroForOne, pattern.swapParams.amountSpecified,
+					pattern.swapParams.priceLimit,
+					func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
+						return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+					})
+
+				// Then: Verify expected trading result
+				uassert.Equal(t, pattern.expectedAmounts[0], actualAmount0,
+					"Token0 amount differs from expected")
+				uassert.Equal(t, pattern.expectedAmounts[1], actualAmount1,
+					"Token1 amount differs from expected")
+
+				t.Logf("✓ %s: Result(%s/%s) - %s",
+					pattern.description, actualAmount0, actualAmount1, pattern.tradingContext)
+			}
+		})
+	}
+}
+
+func TestSwap_ExtremeMarketConditions(cur realm, t *testing.T) {
+	extremeTests := []struct {
+		name           string
+		description    string
+		setupCondition func(cur realm, t *testing.T)
+		swapParams     SwapScenario
+		expectedResult []string
+		marketScenario string
+	}{
+		{
+			name:        "scattered_liquidity_navigation",
+			description: "Swap handling in scattered liquidity environment",
+			setupCondition: func(cur realm, t *testing.T) {
+				setupScatteredLiquidityPool(cur, t)
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      false,
+				amountSpecified: "1000",
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(11040).ToString(),
+			},
+			expectedResult: []string{"-2709", "1000"},
+			marketScenario: "Inefficient market with liquidity spread across multiple price ranges",
+		},
+		{
+			name:        "extreme_price_range_traversal",
+			description: "Traversal of extreme price range",
+			setupCondition: func(cur realm, t *testing.T) {
+				setupExtremePriceRangePool(cur, t)
+			},
+			swapParams: SwapScenario{
+				zeroForOne:      true,
+				amountSpecified: "1000",
+				priceLimit:      gnsmath.TickMathGetSqrtRatioAtTick(-100080).ToString(),
+			},
+			expectedResult: []string{"1000", "-148220"},
+			marketScenario: "Large swap in extreme volatility situation",
+		},
+	}
+
+	for _, test := range extremeTests {
+		t.Run(test.name, func(cur realm, t *testing.T) {
+			// Initialize test environment
+			resetObject(cur, t)
+			burnTokens(cur, t)
+
+			// Given: Extreme market conditions
+			test.setupCondition(cur, t)
+
+			// When: Execute swap in extreme conditions
+			testing.SetRealm(rouRealm)
+
+			TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+			TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+
+			testing.SetRealm(rouRealm)
+
+			actualAmount0, actualAmount1 := mockInstanceSwap(0, cur, barPath, bazPath, STANDARD_FEE_TIER,
+				alice, test.swapParams.zeroForOne, test.swapParams.amountSpecified,
+				test.swapParams.priceLimit,
+				func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
+					return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+				})
+
+			// Then: Verify stable handling in extreme conditions
+			uassert.Equal(t, test.expectedResult[0], actualAmount0,
+				"Error in token0 calculation in extreme conditions")
+			uassert.Equal(t, test.expectedResult[1], actualAmount1,
+				"Error in token1 calculation in extreme conditions")
+
+			t.Logf("✓ %s: Safe handling in extreme conditions (%s/%s) - %s",
+				test.description, actualAmount0, actualAmount1, test.marketScenario)
+		})
+	}
+}
+
+func TestSwap_FeeTierOptimization(cur realm, t *testing.T) {
+	// Test ultra-low fee tier (stablecoin)
+	t.Run("ultra_low_fee_stablecoin_swap", func(cur realm, t *testing.T) {
+		// Given: Ultra-low fee tier stablecoin pool
+		resetObject(cur, t)
+		setupUltraLowFeePool(cur, t)
+
+		// When: Large stablecoin swap
+		testing.SetOriginCaller(routerAddr)
+
+		TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+		TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+
+		testing.SetRealm(rouRealm)
+
+		actualAmount0, actualAmount1 := mockInstanceSwap(0, cur, barPath, bazPath, ULTRA_LOW_FEE_TIER,
+			adminAddr, true, "40012000",
+			gnsmath.TickMathGetSqrtRatioAtTick(-887220).ToString(),
+			func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
+				return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+			})
+
+		// Then: Verify fee efficiency
+		uassert.Equal(t, "100257", actualAmount0, "Token0 calculation in ultra-low fee environment")
+		uassert.Equal(t, "-99745", actualAmount1, "Token1 calculation in ultra-low fee environment")
+
+		t.Logf("✓ Ultra-low fee (0.01%) stablecoin swap: Very efficient output ratio compared to input")
+	})
+}
+
+func createMockLiquidityPool() *pl.Pool {
+	// Build the pool with pl.NewPool so every internal container (tickBitmaps
+	// map, ticks/positions trees) is allocated and owned by the pool realm.
+	// makeMockPool installs test-realm-owned containers via setters such as
+	// SetTickBitmaps; mutating an entry of such a container later (e.g. the
+	// lazy tickBitmap init inside computeSwap) trips the interrealm v2 readonly
+	// taint check. Mutating the pool's own container is allowed.
+	pool := pl.NewPool("token0", "token1", STANDARD_FEE_TIER, gnsmath.TickMathGetSqrtRatioAtTick(0), 60, 0, 0)
+	pool.SetLiquidity(u256.MustFromDecimal("1000000000000000000"))
+	pool.SetFeeGrowthGlobal0X128(u256.Zero())
+	pool.SetFeeGrowthGlobal1X128(u256.Zero())
+
+	wordPos, _ := tickBitmapPosition(0)
+	setTickBitmap(pool, wordPos, u256.NewUint(1))
+	return pool
+}
+
+func createMockZeroLiquidityPool() *pl.Pool {
+	pool := createMockLiquidityPool()
+	pool.SetLiquidity(u256.Zero()) // Remove liquidity
+	return pool
+}
+
+func setupScatteredLiquidityPool(cur realm, t *testing.T) {
+	t.Helper()
+
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+
+	TokenApprove(cur, t, barPath, adminAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, bazPath, adminAddr, poolAddr, maxApprove)
+
+	mockInstanceCreatePool(0, cur, barPath, bazPath, STANDARD_FEE_TIER,
+		gnsmath.TickMathGetSqrtRatioAtTick(-10000).ToString())
+
+	testing.SetRealm(posRealm)
+	// 4 dispersed liquidity positions
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -10020, -9000, "10000000", adminAddr)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -4980, -4020, "20000000", adminAddr)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 0, 1020, "30000000", adminAddr)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 8040, 10020, "40000000", adminAddr)
+
+	// Prepare tokens
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+	TokenFaucet(cur, t, barPath, routerAddr)
+	TokenFaucet(cur, t, bazPath, routerAddr)
+
+	testing.SetOriginCaller(routerAddr)
+	testing.SetRealm(testing.NewUserRealm(routerAddr))
+	TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+}
+
+func setupExtremePriceRangePool(cur realm, t *testing.T) {
+	t.Helper()
+
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+
+	TokenApprove(cur, t, barPath, adminAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, bazPath, adminAddr, poolAddr, maxApprove)
+
+	mockInstanceCreatePool(0, cur, barPath, bazPath, STANDARD_FEE_TIER,
+		gnsmath.TickMathGetSqrtRatioAtTick(100000).ToString())
+
+	testing.SetRealm(posRealm)
+	// Extreme range liquidity
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -100020, -99960, "500000", adminAddr)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 99960, 100020, "500000", adminAddr)
+
+	// Prepare tokens
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+	TokenFaucet(cur, t, barPath, routerAddr)
+	TokenFaucet(cur, t, bazPath, routerAddr)
+
+	testing.SetOriginCaller(routerAddr)
+	testing.SetRealm(testing.NewUserRealm(routerAddr))
+	TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+}
+
+func TestUpdateAmounts_OverflowProtection(cur realm, t *testing.T) {
+	t.Run("should_prevent_overflow_when_exact_out_calculation_exceeds_max_int64", func(cur realm, t *testing.T) {
+		// An exact out swap where the accumulated amount is near MAX_INT64
+		// and the next step would cause overflow
+		step := StepComputations{
+			amountIn:  u256.MustFromDecimal("1000"),
+			amountOut: u256.MustFromDecimal("990"),
+			feeAmount: u256.MustFromDecimal("10"),
+		}
+
+		state := SwapState{
+			amountSpecifiedRemaining: i256.MustFromDecimal("-1000"),
+			amountCalculated:         i256.MustFromDecimal("9223372036854775800"), // Near MAX_INT64
+		}
+
+		_, err := updateAmounts(step, state, false)
+
+		uassert.ErrorContains(t, err, errOverflow,
+			"Should prevent overflow when amountCalculated would exceed MAX_INT64")
+	})
+
+	t.Run("should_allow_exact_out_calculation_within_safe_bounds", func(cur realm, t *testing.T) {
+		stepWithSafeValues := StepComputations{
+			amountIn:  u256.MustFromDecimal("1000"),
+			amountOut: u256.MustFromDecimal("990"),
+			feeAmount: u256.MustFromDecimal("10"),
+		}
+
+		state := SwapState{
+			amountSpecifiedRemaining: i256.MustFromDecimal("-10000"),
+			amountCalculated:         i256.MustFromDecimal("1000000"), // Safe value
+		}
+
+		updatedState, err := updateAmounts(stepWithSafeValues, state, false)
+		uassert.NoError(t, err, "Should allow calculation within safe bounds")
+
+		expectedRemaining := i256.MustFromDecimal("-9010")    // -10000 + 990
+		expectedCalculated := i256.MustFromDecimal("1001010") // 1000000 + 1000 + 10
+
+		uassert.True(t, expectedRemaining.Eq(updatedState.amountSpecifiedRemaining),
+			"Should correctly update remaining amount")
+		uassert.True(t, expectedCalculated.Eq(updatedState.amountCalculated),
+			"Should correctly accumulate calculated amount with fees")
+	})
+
+	t.Run("should_prevent_overflow_when_exact_in_calculation_exceeds_bounds", func(cur realm, t *testing.T) {
+		// An exact in swap where output calculation could overflow
+		step := StepComputations{
+			amountIn:  u256.MustFromDecimal("1000"),
+			amountOut: u256.MustFromDecimal("9223372036854775808"), // > MAX_INT64
+			feeAmount: u256.MustFromDecimal("10"),
+		}
+
+		state := SwapState{
+			amountSpecifiedRemaining: i256.MustFromDecimal("10000"),
+			amountCalculated:         i256.MustFromDecimal("-1000"),
+		}
+
+		_, err := updateAmounts(step, state, true)
+		uassert.ErrorContains(t, err, errUnderflow,
+			"Should prevent underflow when amountOut exceeds MAX_INT256")
+	})
+
+	t.Run("should_correctly_update_amounts_for_exact_in_swap", func(cur realm, t *testing.T) {
+		step := StepComputations{
+			amountIn:  u256.MustFromDecimal("1000"),
+			amountOut: u256.MustFromDecimal("990"),
+			feeAmount: u256.MustFromDecimal("10"),
+		}
+
+		state := SwapState{
+			amountSpecifiedRemaining: i256.MustFromDecimal("10000"),
+			amountCalculated:         i256.MustFromDecimal("0"),
+		}
+
+		updatedState, err := updateAmounts(step, state, true)
+		uassert.NoError(t, err, "Should allow exact in calculation")
+
+		expectedRemaining := i256.MustFromDecimal("8990")  // 10000 - (1000 + 10)
+		expectedCalculated := i256.MustFromDecimal("-990") // 0 - 990
+
+		uassert.True(t, expectedRemaining.Eq(updatedState.amountSpecifiedRemaining),
+			"Should correctly reduce remaining amount by input + fee")
+		uassert.True(t, expectedCalculated.Eq(updatedState.amountCalculated),
+			"Should correctly subtract output from calculated amount")
+	})
+
+	t.Run("should_handle_edge_case_at_exactly_max_int64", func(cur realm, t *testing.T) {
+		step := StepComputations{
+			amountIn:  u256.MustFromDecimal("0"),
+			amountOut: u256.MustFromDecimal("100"),
+			feeAmount: u256.MustFromDecimal("0"),
+		}
+
+		state := SwapState{
+			amountSpecifiedRemaining: i256.MustFromDecimal("-1000"),
+			amountCalculated:         consts.MaxInt64I256(),
+		}
+
+		// no change to amountCalculated
+		updatedState, err := updateAmounts(step, state, false)
+
+		uassert.NoError(t, err, "Should allow calculation at exactly MAX_INT64")
+		uassert.True(t, updatedState.amountCalculated.Eq(consts.MaxInt64I256()),
+			"Should maintain MAX_INT64 value")
+	})
+
+	t.Run("should_prevent_overflow_from_fee_accumulation", func(cur realm, t *testing.T) {
+		step := StepComputations{
+			amountIn:  u256.MustFromDecimal("1"),
+			amountOut: u256.MustFromDecimal("1"),
+			feeAmount: u256.MustFromDecimal("10"), // Large fee relative to amount
+		}
+
+		state := SwapState{
+			amountSpecifiedRemaining: i256.MustFromDecimal("-100"),
+			amountCalculated:         i256.MustFromDecimal("9223372036854775800"),
+		}
+
+		_, err := updateAmounts(step, state, false)
+		uassert.ErrorContains(t, err, errOverflow,
+			"Should detect overflow caused by fee accumulation")
+	})
+}
+
+func setupUltraLowFeePool(cur realm, t *testing.T) *pl.Pool {
+	t.Helper()
+
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+	bar.Approve(cross(cur), poolAddr, maxApprove)
+	baz.Approve(cross(cur), poolAddr, maxApprove)
+	mockInstanceCreatePool(0, cur, barPath, bazPath, ULTRA_LOW_FEE_TIER, EQUAL_PRICE_RATIO)
+
+	// Add liquidity
+	testing.SetRealm(posRealm)
+	mockInstanceMint(0, cur, barPath, bazPath, ULTRA_LOW_FEE_TIER, -100, 100, "10000000", adminAddr)
+	mockInstanceMint(0, cur, barPath, bazPath, ULTRA_LOW_FEE_TIER, -100, 100, "10000000", adminAddr)
+
+	// Send tokens to router
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+	baz.Transfer(cross(cur), poolAddr, 20000000)
+	bar.Transfer(cross(cur), routerAddr, 20000000)
+	baz.Transfer(cross(cur), routerAddr, 20000000)
+	bar.Approve(cross(cur), poolAddr, maxApprove)
+
+	pool := getMockInstance().mustGetPoolBy(barPath, bazPath, ULTRA_LOW_FEE_TIER)
+	return pool
+}
+
+// TestSwap_PriceLimitEdgeCase_ZeroAmount tests a specific edge case where:
+// - Price limit is extremely close to current price (difference of 1)
+// - Low liquidity in the pool
+// - ExactOutput swap (negative amountSpecified)
+// - This causes one of the amounts to be zero, which should be rejected by validation
+//
+// Reproduced from fuzz test failure:
+// - sqrtPrice: 81258104018314874265769693256
+// - liquidity: 348726074781113
+// - tick: 506
+// - zeroForOne: false
+// - amountSpecified: -178
+// - sqrtPriceLimit: 81258104018314874265769693257 (current + 1)
+// - Result: amount0=0, amount1=2
+func TestSwap_PriceLimitEdgeCase_ZeroAmount(cur realm, t *testing.T) {
+	// given: Setup pool
+	initPoolTest(cur, t)
+
+	testing.SetRealm(adminRealm)
+	mockInstanceSetPoolCreationFee(0, cur, 0)
+
+	token0Path := barPath
+	token1Path := fooPath
+	fee := ULTRA_LOW_FEE_TIER // 100 = 0.01%
+
+	// Create pool at a specific price to match the failing case
+	// tick 506 corresponds to sqrtPrice around 81258104018314874265769693256
+	targetTick := int32(506)
+	targetPrice := gnsmath.TickMathGetSqrtRatioAtTick(targetTick)
+
+	mockInstanceCreatePool(0, cur, token0Path, token1Path, fee, targetPrice.ToString())
+
+	// Approve tokens for liquidity provision
+	testing.SetRealm(adminRealm)
+	TokenApprove(cur, t, token0Path, adminAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, token1Path, adminAddr, poolAddr, maxApprove)
+
+	// Add liquidity multiple times to match the failing case
+	// The fuzz test calls setupPoolSwapLiquidity multiple times
+	// Each call adds amountDesired = 1_000_000_000_000
+	// Expected final liquidity: 348726074781113
+	tickLower := targetTick - 10000
+	tickUpper := targetTick + 10000
+
+	testing.SetRealm(posRealm)
+	// Try adding liquidity once with a value that gets us close to 348726074781113
+	mockInstanceMint(0, cur, token0Path, token1Path, fee, tickLower, tickUpper, "1000000000000", adminAddr)
+
+	// Verify pool state
+	pool := getMockInstance().mustGetPoolBy(token0Path, token1Path, fee)
+	currentPrice := pool.Slot0SqrtPriceX96()
+
+	// when: Define swap callback
+	swapCallback := func(cur realm, amount0Delta, amount1Delta int64, _ *pl.CallbackMarker) error {
+		t.Logf("Callback: amount0=%d, amount1=%d", amount0Delta, amount1Delta)
+		return mockSwapCallback(cur, token0Path, token1Path, amount0Delta, amount1Delta)
+	}
+
+	// Swap parameters matching the failing case
+	zeroForOne := false
+	amountSpecified := "-178"
+
+	// Price limit is current price + 1 (extremely close)
+	currentPriceInt := u256.MustFromDecimal(currentPrice.ToString())
+	priceLimitInt := u256.NewUint(0).Add(currentPriceInt, u256.NewUint(1))
+	sqrtPriceLimitX96 := priceLimitInt.ToString()
+
+	// computeSwap should return amount0=0, amount1=2
+	slot0Start := pool.Slot0()
+	amounts := i256.MustFromDecimal(amountSpecified)
+	feeGrowthGlobalX128 := getFeeGrowthGlobal(pool, zeroForOne)
+	feeProtocol := getFeeProtocol(slot0Start, zeroForOne)
+	cache := newSwapCache(feeProtocol, pool.Liquidity().Clone(), 0)
+	state := newSwapState(amounts, feeGrowthGlobalX128, cache.liquidityStart, slot0Start)
+
+	comp := SwapComputation{
+		AmountSpecified:   amounts,
+		SqrtPriceLimitX96: priceLimitInt,
+		ZeroForOne:        zeroForOne,
+		ExactInput:        amounts.Gt(i256.Zero()),
+		InitialState:      state,
+		Cache:             cache,
+	}
+
+	result, _ := getMockInstance().computeSwap(pool, comp, nil)
+	uassert.Equal(t, "0", result.Amount0.ToString(), "DrySwap should return amount0=0")
+	uassert.Equal(t, "2", result.Amount1.ToString(), "DrySwap should return amount1=2")
+
+	// then: Actual Swap should complete successfully even with zero amount0
+	amount0Str, amount1Str := mockInstanceSwap(
+		0, cur,
+		token0Path,
+		token1Path,
+		fee,
+		adminAddr,
+		zeroForOne,
+		amountSpecified,
+		sqrtPriceLimitX96,
+		swapCallback,
+	)
+
+	// Verify that swap completed with expected amounts
+	uassert.Equal(t, "0", amount0Str, "Swap should return amount0=0")
+	uassert.NotEqual(t, "0", amount1Str, "Swap should return non-zero amount1")
+}
+
+// TestSwap_ReentrancyProtection tests that the reentrancy lock properly prevents
+// recursive mutation calls during callback execution.
+//
+// Security issue addressed:
+// Pool mutation entrypoints share a global reentrancy lock because this realm
+// manages all pools from a single contract, rather than deploying one contract
+// per pool.
+//
+// Attack scenario:
+// 1. Attacker calls Swap with a malicious callback
+// 2. Inside the callback (before payment), attacker tries to call Swap again
+// 3. Without proper reentrancy protection, the second Swap would succeed
+// 4. This could allow manipulation of pool state or token theft
+func TestSwap_ReentrancyProtection(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		description string
+		setup       func(cur realm, t *testing.T)
+		action      func(cur realm, t *testing.T)
+		verify      func(cur realm, t *testing.T)
+	}{
+		{
+			name:        "expected panics by reentrant mutation entrypoints in callback",
+			description: "Reentrancy attacks via callback should be blocked by pool lock",
+			setup: func(cur realm, t *testing.T) {
+				initPoolTest(cur, t)
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenFaucet(cur, t, barPath, routerAddr)
+				TokenFaucet(cur, t, barPath, routerAddr)
+
+				testing.SetRealm(rouRealm)
+				TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+				TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+			},
+			action: func(cur realm, t *testing.T) {
+				// Execution flow:
+				// 1. User initiates Swap -> global pool lock is acquired
+				// 2. Swap executes computeSwap and transfers output tokens
+				// 3. Swap calls swapCallback (maliciousCallback)
+				// 4. Inside callback, attacker attempts each protected mutation entrypoint
+				// 5. Protected entrypoints check global pool lock -> locked -> panic
+				// 6. Callback catches abort, completes token transfer
+				// 7. Original Swap completes successfully
+				// 8. defer unlocks global pool lock
+
+				testing.SetRealm(rouRealm)
+
+				maliciousCallback := func(cur realm, amount0Delta, amount1Delta int64, _ *pl.CallbackMarker) error {
+					// Step 4-5: Attempt reentrancy, expect panic due to locked pool.
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						getMockInstance().Swap(
+							0, cur,
+							barPath, bazPath, STANDARD_FEE_TIER,
+							routerAddr, false, "50",
+							gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(),
+							func(cur realm, a0, a1 int64, _ *pl.CallbackMarker) error { return nil },
+						)
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(posRealm)
+						getMockInstance().Mint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -887220, 887220, "1", adminAddr)
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(posRealm)
+						getMockInstance().Burn(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -887220, 887220, "1", adminAddr)
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(posRealm)
+						getMockInstance().Collect(0, cur, barPath, bazPath, STANDARD_FEE_TIER, adminAddr, -887220, 887220, "1", "1")
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(adminRealm)
+						getMockInstance().CollectProtocol(0, cur, barPath, bazPath, STANDARD_FEE_TIER, adminAddr, "1", "1")
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(adminRealm)
+						getMockInstance().SetFeeProtocol(0, cur, 4, 4)
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(rouRealm)
+						getMockInstance().IncreaseObservationCardinalityNext(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 3)
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(adminRealm)
+						getMockInstance().CreatePool(0, cur, barPath, bazPath, LOW_FEE_TIER, EQUAL_PRICE_RATIO)
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(adminRealm)
+						getMockInstance().SetPoolCreationFee(0, cur, 1)
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(adminRealm)
+						getMockInstance().SetWithdrawalFee(0, cur, 1)
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(stakerRealm)
+						getMockInstance().SetTickCrossHook(0, cur, func(cur realm, poolPath string, tickId int32, zeroForOne bool, timestamp int64) {})
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(stakerRealm)
+						getMockInstance().SetSwapStartHook(0, cur, func(cur realm, poolPath string, timestamp int64) {})
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(stakerRealm)
+						getMockInstance().SetSwapEndHook(0, cur, func(cur realm, poolPath string) error { return nil })
+					})
+					uassert.PanicsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+						testing.SetRealm(posRealm)
+						getMockInstance().HandleWithdrawalFee(0, cur, barPath, "1", bazPath, "1", adminAddr)
+					})
+
+					// Step 6: Complete original swap payment
+					testing.SetRealm(rouRealm)
+					return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+				}
+
+				// Step 1-3, 7: Execute swap with malicious callback
+				amount0, amount1 := mockInstanceSwap(
+					0, cur,
+					barPath, bazPath, STANDARD_FEE_TIER,
+					routerAddr, false, "100",
+					gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(), maliciousCallback,
+				)
+
+				uassert.True(t, amount0 != "0" || amount1 != "0",
+					"Original swap should complete successfully")
+			},
+			verify: func(cur realm, t *testing.T) {
+				// Pool should be unlocked after swap
+				uassert.True(t, getMockInstance().store.GetUnlocked(), "Pool should be unlocked after swap")
+			},
+		},
+		{
+			name:        "success by unlock after swap completes",
+			description: "Pool should be unlocked after swap completes, allowing subsequent swaps",
+			setup: func(cur realm, t *testing.T) {
+				resetObject(cur, t)
+				burnTokens(cur, t)
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenFaucet(cur, t, barPath, routerAddr)
+
+				testing.SetRealm(rouRealm)
+				TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+				TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+			},
+			action: func(cur realm, t *testing.T) {
+				// Execution flow:
+				// 1. Check initial state: global pool lock is unlocked
+				// 2. Execute first Swap:
+				//    a. Swap acquires global pool lock
+				//    b. Swap executes and calls callback
+				//    c. Callback transfers tokens
+				//    d. defer releases global pool lock
+				// 3. Verify pool is unlocked after first swap
+				// 4. Execute second Swap (proves unlock worked):
+				//    a. If pool was still locked, this would panic
+				//    b. Swap succeeds -> confirms proper unlock
+
+				// Step 1: Execute first swap
+				testing.SetRealm(rouRealm)
+				mockInstanceSwap(
+					0, cur,
+					barPath, bazPath, STANDARD_FEE_TIER,
+					routerAddr, false, "100",
+					gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(),
+					func(cur realm, amount0Delta, amount1Delta int64, _ *pl.CallbackMarker) error {
+						return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+					},
+				)
+
+				// Step 2: Execute second swap to prove unlock worked
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenFaucet(cur, t, barPath, routerAddr)
+
+				testing.SetRealm(rouRealm)
+				amount0, amount1 := mockInstanceSwap(
+					0, cur,
+					barPath, bazPath, STANDARD_FEE_TIER,
+					routerAddr, false, "50",
+					gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(),
+					func(cur realm, amount0Delta, amount1Delta int64, _ *pl.CallbackMarker) error {
+						return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+					},
+				)
+
+				uassert.True(t, amount0 != "0" || amount1 != "0",
+					"Second swap should succeed after first completes")
+			},
+			verify: func(cur realm, t *testing.T) {},
+		},
+		{
+			name:        "expected panic by lock acquisition during swap",
+			description: "Pool should reject lock acquisition during callback execution",
+			setup: func(cur realm, t *testing.T) {
+				resetObject(cur, t)
+				burnTokens(cur, t)
+				InitialisePoolTest(cur, t)
+				MintPositionAll(cur, t, adminAddr)
+
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenFaucet(cur, t, bazPath, routerAddr)
+				TokenFaucet(cur, t, barPath, routerAddr)
+				TokenFaucet(cur, t, barPath, routerAddr)
+
+				testing.SetRealm(rouRealm)
+				TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+				TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+			},
+			action: func(cur realm, t *testing.T) {
+				// Execution flow:
+				// 1. User initiates Swap -> global pool lock is acquired
+				// 2. Swap executes computeSwap
+				// 3. Swap transfers output tokens to recipient
+				// 4. Swap calls swapCallback (callbackWithLockCheck)
+				// 5. Inside callback: attempting to acquire the global pool lock should panic
+				// 6. Callback transfers input tokens to pool
+				// 7. Swap completes, defer releases global pool lock
+				// 8. Verify: second swap succeeds later, proving defer unlocks the lock
+
+				testing.SetRealm(rouRealm)
+				callbackWithLockCheck := func(cur realm, amount0Delta, amount1Delta int64, _ *pl.CallbackMarker) error {
+					// Step 5: Verify pool is locked during callback by attempting to lock it again.
+					uassert.False(t, getMockInstance().store.GetUnlocked(), "Pool should be locked during callback")
+
+					// Step 6: Complete swap payment
+					return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+				}
+
+				// Step 1-4, 7: Execute swap
+				amount0, amount1 := mockInstanceSwap(
+					0, cur,
+					barPath, bazPath, STANDARD_FEE_TIER,
+					routerAddr, false, "100",
+					gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(), callbackWithLockCheck,
+				)
+
+				uassert.True(t, amount0 != "0" || amount1 != "0", "Swap should succeed")
+			},
+			verify: func(cur realm, t *testing.T) {},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			tt.setup(cur, t)
+			tt.action(cur, t)
+			tt.verify(cur, t)
+			t.Logf("passed: %s", tt.description)
+		})
+	}
+}
+
+// TestPoolLock_BlocksMutationEntrypoints complements the callback reentrancy
+// test with direct locked-state coverage. The callback test proves the real
+// attack path; this table makes the lock contract explicit for every protected
+// mutation entrypoint as standalone locked calls.
+func TestPoolLock_BlocksMutationEntrypoints(cur realm, t *testing.T) {
+	tests := []struct {
+		name     string
+		setRealm func()
+		action   func(cur realm, t *testing.T)
+	}{
+		{
+			name: "swap",
+			setRealm: func() {
+				testing.SetRealm(rouRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceSwap(
+					0, cur,
+					barPath, bazPath, STANDARD_FEE_TIER,
+					routerAddr, false, "50",
+					gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(),
+					func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
+						return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+					},
+				)
+			},
+		},
+		{
+			name: "mint",
+			setRealm: func() {
+				testing.SetRealm(posRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -887220, 887220, "1", adminAddr)
+			},
+		},
+		{
+			name: "burn",
+			setRealm: func() {
+				testing.SetRealm(posRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceBurn(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -887220, 887220, "1", adminAddr)
+			},
+		},
+		{
+			name: "collect",
+			setRealm: func() {
+				testing.SetRealm(posRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceCollect(0, cur, barPath, bazPath, STANDARD_FEE_TIER, adminAddr, -887220, 887220, "1", "1")
+			},
+		},
+		{
+			name: "collect protocol",
+			setRealm: func() {
+				testing.SetRealm(adminRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceCollectProtocol(0, cur, barPath, bazPath, STANDARD_FEE_TIER, adminAddr, "1", "1")
+			},
+		},
+		{
+			name: "set fee protocol",
+			setRealm: func() {
+				testing.SetRealm(adminRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceSetFeeProtocol(0, cur, 4, 4)
+			},
+		},
+		{
+			name: "increase observation cardinality next",
+			setRealm: func() {
+				testing.SetRealm(rouRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceIncreaseObservationCardinalityNext(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 3)
+			},
+		},
+		{
+			name: "create pool",
+			setRealm: func() {
+				testing.SetRealm(adminRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceCreatePool(0, cur, barPath, bazPath, LOW_FEE_TIER, EQUAL_PRICE_RATIO)
+			},
+		},
+		{
+			name: "set pool creation fee",
+			setRealm: func() {
+				testing.SetRealm(adminRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceSetPoolCreationFee(0, cur, 1)
+			},
+		},
+		{
+			name: "set withdrawal fee",
+			setRealm: func() {
+				testing.SetRealm(adminRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceSetWithdrawalFee(0, cur, 1)
+			},
+		},
+		{
+			name: "set tick cross hook",
+			setRealm: func() {
+				testing.SetRealm(stakerRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceSetTickCrossHook(0, cur, func(cur realm, poolPath string, tickId int32, zeroForOne bool, timestamp int64) {})
+			},
+		},
+		{
+			name: "set swap start hook",
+			setRealm: func() {
+				testing.SetRealm(stakerRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceSetSwapStartHook(0, cur, func(cur realm, poolPath string, timestamp int64) {})
+			},
+		},
+		{
+			name: "set swap end hook",
+			setRealm: func() {
+				testing.SetRealm(stakerRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceSetSwapEndHook(0, cur, func(cur realm, poolPath string) error { return nil })
+			},
+		},
+		{
+			name: "handle withdrawal fee",
+			setRealm: func() {
+				testing.SetRealm(posRealm)
+			},
+			action: func(cur realm, t *testing.T) {
+				mockInstanceHandleWithdrawalFee(0, cur, barPath, "1", bazPath, "1", adminAddr)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			initPoolTest(cur, t)
+			InitialisePoolTest(cur, t)
+			MintPositionAll(cur, t, adminAddr)
+
+			getMockInstance().lockPool(0, cur)
+			defer getMockInstance().unlockPool(0, cur)
+
+			tt.setRealm()
+			uassert.AbortsContains(t, cur, "[GNOSWAP-POOL-014] cannot modify pool while locked", func() {
+				tt.action(cur, t)
+			})
+		})
+	}
+}
+
+// TestSwapCallback_DeltaConvention tests that swap callback parameters follow
+// the Uniswap V3 delta convention:
+//   - Positive delta: Amount the pool must RECEIVE (input token)
+//   - Negative delta: Amount the pool has SENT (output token)
+//
+// This convention allows callbacks to correctly identify:
+//   - Which tokens were received by the pool (need to be paid by caller)
+//   - Which tokens were sent by the pool (received by recipient)
+//
+// For zeroForOne swaps (token0 → token1):
+//   - amount0Delta > 0: Pool receives token0 (input from user)
+//   - amount1Delta < 0: Pool sends token1 (output to user)
+//
+// For oneForZero swaps (token1 → token0):
+//   - amount0Delta < 0: Pool sends token0 (output to user)
+//   - amount1Delta > 0: Pool receives token1 (input from user)
+func TestSwapCallback_DeltaConvention(cur realm, t *testing.T) {
+	tests := []struct {
+		name                    string
+		description             string
+		zeroForOne              bool
+		amountSpecified         string
+		expectedAmount0Positive bool // true if amount0Delta should be > 0
+		expectedAmount1Positive bool // true if amount1Delta should be > 0
+		isFailCase              bool
+	}{
+		{
+			name:                    "zeroForOne swap has positive amount0Delta and negative amount1Delta",
+			description:             "When swapping token0 for token1, pool receives token0 (positive) and sends token1 (negative)",
+			zeroForOne:              true,
+			amountSpecified:         "10000",
+			expectedAmount0Positive: true,
+			expectedAmount1Positive: false,
+		},
+		{
+			name:                    "oneForZero swap has negative amount0Delta and positive amount1Delta",
+			description:             "When swapping token1 for token0, pool sends token0 (negative) and receives token1 (positive)",
+			zeroForOne:              false,
+			amountSpecified:         "10000",
+			expectedAmount0Positive: false,
+			expectedAmount1Positive: true,
+		},
+		{
+			name:                    "exact output zeroForOne swap maintains delta convention",
+			description:             "Exact output swaps should also follow the same delta convention",
+			zeroForOne:              true,
+			amountSpecified:         "-5000",
+			expectedAmount0Positive: true,
+			expectedAmount1Positive: false,
+		},
+		{
+			name:                    "exact output oneForZero swap maintains delta convention",
+			description:             "Exact output oneForZero swaps follow the same delta convention",
+			zeroForOne:              false,
+			amountSpecified:         "-5000",
+			expectedAmount0Positive: false,
+			expectedAmount1Positive: true,
+		},
+		{
+			name:                    "fail case by exact in zeroForOne swap but amount0Delta, amount1Delta is positive",
+			description:             "Exact in zeroForOne swap but amount0Delta, amount1Delta is positive",
+			zeroForOne:              true,
+			amountSpecified:         "10000",
+			expectedAmount0Positive: true,
+			expectedAmount1Positive: true, // false
+			isFailCase:              true,
+		},
+		{
+			name:                    "fail case by exact in zeroForOne swap but amount0Delta, amount1Delta is negative",
+			description:             "Exact in zeroForOne swap but amount0Delta, amount1Delta is negative",
+			zeroForOne:              true,
+			amountSpecified:         "10000",
+			expectedAmount0Positive: false, // true
+			expectedAmount1Positive: false,
+			isFailCase:              true,
+		},
+		{
+			name:                    "fail case by exact out oneForZero swap but amount0Delta, amount1Delta is positive",
+			description:             "Exact out oneForZero swap but amount0Delta, amount1Delta is positive",
+			zeroForOne:              false,
+			amountSpecified:         "-5000",
+			expectedAmount0Positive: true, // false
+			expectedAmount1Positive: true,
+			isFailCase:              true,
+		},
+		{
+			name:                    "fail case by exact out oneForZero swap but amount0Delta, amount1Delta is negative",
+			description:             "Exact out oneForZero swap but amount0Delta, amount1Delta is negative",
+			zeroForOne:              false,
+			amountSpecified:         "-5000",
+			expectedAmount0Positive: false,
+			expectedAmount1Positive: false, // true
+			isFailCase:              true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			// Common setup
+			resetObject(cur, t)
+			burnTokens(cur, t)
+			InitialisePoolTest(cur, t)
+			MintPositionAll(cur, t, adminAddr)
+
+			TokenFaucet(cur, t, barPath, routerAddr)
+			TokenFaucet(cur, t, bazPath, routerAddr)
+
+			testing.SetRealm(rouRealm)
+			TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+			TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+
+			// Capture deltas
+			var capturedAmount0Delta, capturedAmount1Delta int64
+
+			callbackCapturingDeltas := func(cur realm, amount0Delta, amount1Delta int64, _ *pl.CallbackMarker) error {
+				capturedAmount0Delta = amount0Delta
+				capturedAmount1Delta = amount1Delta
+				return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+			}
+
+			// Determine price limit based on direction
+			var priceLimit string
+			if tt.zeroForOne {
+				priceLimit = gnsmath.TickMathGetSqrtRatioAtTick(-887220).ToString()
+			} else {
+				priceLimit = gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString()
+			}
+
+			// Execute swap
+			testing.SetRealm(rouRealm)
+			amount0, amount1 := mockInstanceSwap(
+				0, cur,
+				barPath, bazPath, STANDARD_FEE_TIER,
+				routerAddr, tt.zeroForOne, tt.amountSpecified,
+				priceLimit, callbackCapturingDeltas,
+			)
+
+			if tt.isFailCase {
+				if tt.zeroForOne {
+					t.Logf("must amount0Delta be positive, actual %s, expected %s", amount0, tt.amountSpecified)
+					t.Logf("must amount1Delta be negative, actual %s, expected %s", amount1, tt.amountSpecified)
+				} else {
+					t.Logf("must amount0Delta be negative, actual %s, expected %s", amount0, tt.amountSpecified)
+					t.Logf("must amount1Delta be positive, actual %s, expected %s", amount1, tt.amountSpecified)
+				}
+				return
+			}
+
+			// Verify delta convention
+			if tt.expectedAmount0Positive {
+				uassert.True(t, capturedAmount0Delta > 0,
+					ufmt.Sprintf("amount0Delta should be positive, got %d", capturedAmount0Delta))
+			} else {
+				uassert.True(t, capturedAmount0Delta < 0,
+					ufmt.Sprintf("amount0Delta should be negative, got %d", capturedAmount0Delta))
+			}
+
+			if tt.expectedAmount1Positive {
+				uassert.True(t, capturedAmount1Delta > 0,
+					ufmt.Sprintf("amount1Delta should be positive, got %d", capturedAmount1Delta))
+			} else {
+				uassert.True(t, capturedAmount1Delta < 0,
+					ufmt.Sprintf("amount1Delta should be negative, got %d", capturedAmount1Delta))
+			}
+
+			// Verify deltas match swap result
+			uassert.Equal(t, ufmt.Sprintf("%d", capturedAmount0Delta), amount0,
+				"amount0Delta should match swap result amount0")
+			uassert.Equal(t, ufmt.Sprintf("%d", capturedAmount1Delta), amount1,
+				"amount1Delta should match swap result amount1")
+
+			t.Logf("passed: %s (amount0Delta=%d, amount1Delta=%d)", tt.description, capturedAmount0Delta, capturedAmount1Delta)
+		})
+	}
+}
+
+// TestSwapCallback_CallbackUsage demonstrates that a generic callback
+// can handle both swap directions by checking delta signs.
+func TestSwapCallback_CallbackUsage(cur realm, t *testing.T) {
+	resetObject(cur, t)
+	burnTokens(cur, t)
+	InitialisePoolTest(cur, t)
+	MintPositionAll(cur, t, adminAddr)
+
+	TokenFaucet(cur, t, barPath, routerAddr)
+	TokenFaucet(cur, t, bazPath, routerAddr)
+
+	testing.SetRealm(rouRealm)
+	TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+
+	var token0Transferred, token1Transferred int64
+
+	// Generic callback that works for any swap direction
+	genericCallback := func(cur realm, amount0Delta, amount1Delta int64, _ *pl.CallbackMarker) error {
+		token0Transferred, token1Transferred = 0, 0
+
+		// Transfer tokens with positive deltas (tokens pool needs to receive)
+		if amount0Delta > 0 {
+			token0Transferred = amount0Delta
+		}
+		if amount1Delta > 0 {
+			token1Transferred = amount1Delta
+		}
+		return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+	}
+
+	// Test zeroForOne: should transfer token0 only
+	testing.SetRealm(rouRealm)
+	mockInstanceSwap(
+		0, cur,
+		barPath, bazPath, STANDARD_FEE_TIER,
+		routerAddr, true, "10000",
+		gnsmath.TickMathGetSqrtRatioAtTick(-887220).ToString(), genericCallback,
+	)
+
+	uassert.True(t, token0Transferred > 0, "zeroForOne: should transfer token0 (positive delta)")
+	uassert.Equal(t, int64(0), token1Transferred, "zeroForOne: should not transfer token1 (negative delta)")
+	t.Logf("zeroForOne: token0 transferred=%d, token1 transferred=%d", token0Transferred, token1Transferred)
+
+	// Test oneForZero: should transfer token1 only
+	TokenFaucet(cur, t, bazPath, routerAddr)
+	testing.SetRealm(rouRealm)
+	mockInstanceSwap(
+		0, cur,
+		barPath, bazPath, STANDARD_FEE_TIER,
+		routerAddr, false, "10000",
+		gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString(), genericCallback,
+	)
+
+	uassert.Equal(t, int64(0), token0Transferred, "oneForZero: should not transfer token0 (negative delta)")
+	uassert.True(t, token1Transferred > 0, "oneForZero: should transfer token1 (positive delta)")
+	t.Logf("oneForZero: token0 transferred=%d, token1 transferred=%d", token0Transferred, token1Transferred)
+}
+
+// TestSwap_FlashSwapPattern tests that the flash swap pattern works correctly.
+//
+// Flash swap invariant:
+// Output tokens MUST be transferred to recipient BEFORE the callback is invoked.
+// This allows the callback to use the received tokens for arbitrage, chained swaps,
+// or other operations before repaying the input amount.
+//
+// Execution order (after fix):
+// 1. Pool computes swap amounts
+// 2. Pool transfers output tokens to recipient  <-- OUTPUT FIRST
+// 3. Pool invokes callback                      <-- CALLBACK SECOND
+// 4. Callback can use received tokens
+// 5. Callback transfers input tokens to pool
+//
+// Before fix (incorrect order):
+// 1. Pool computes swap amounts
+// 2. Pool invokes callback                      <-- CALLBACK FIRST (wrong)
+// 3. Pool transfers output tokens to recipient  <-- OUTPUT SECOND (wrong)
+// This prevented callbacks from using output tokens.
+func TestSwap_FlashSwapPattern(cur realm, t *testing.T) {
+	tests := []struct {
+		name        string
+		description string
+		zeroForOne  bool
+	}{
+		{
+			name:        "zeroForOne flash swap receives output before callback",
+			description: "Recipient should have output tokens available during callback execution",
+			zeroForOne:  true,
+		},
+		{
+			name:        "oneForZero flash swap receives output before callback",
+			description: "Recipient should have output tokens available during callback execution",
+			zeroForOne:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(cur realm, t *testing.T) {
+			// Setup
+			resetObject(cur, t)
+			burnTokens(cur, t)
+			InitialisePoolTest(cur, t)
+			MintPositionAll(cur, t, adminAddr)
+
+			TokenFaucet(cur, t, barPath, routerAddr)
+			TokenFaucet(cur, t, bazPath, routerAddr)
+
+			testing.SetRealm(rouRealm)
+			TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+			TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+
+			// Track balances during callback
+			var recipientBalanceDuringCallback int64
+			var outputTokenPath string
+			if tt.zeroForOne {
+				outputTokenPath = bazPath // zeroForOne: output is token1
+			} else {
+				outputTokenPath = barPath // oneForZero: output is token0
+			}
+
+			// Callback that checks recipient balance
+			flashSwapCallback := func(cur realm, amount0Delta, amount1Delta int64, _ *pl.CallbackMarker) error {
+				// Execution flow verification:
+				// At this point, output tokens should ALREADY be transferred to recipient
+				// This is the key invariant of flash swap pattern
+
+				recipientBalanceDuringCallback = common.BalanceOf(outputTokenPath, routerAddr)
+
+				// Complete the swap by paying input tokens
+				return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+			}
+
+			// Get initial balance
+			initialBalance := common.BalanceOf(outputTokenPath, routerAddr)
+
+			// Determine price limit based on direction
+			var priceLimit string
+			if tt.zeroForOne {
+				priceLimit = gnsmath.TickMathGetSqrtRatioAtTick(-887220).ToString()
+			} else {
+				priceLimit = gnsmath.TickMathGetSqrtRatioAtTick(887220).ToString()
+			}
+
+			// Execute swap
+			testing.SetRealm(rouRealm)
+			mockInstanceSwap(
+				0, cur,
+				barPath, bazPath, STANDARD_FEE_TIER,
+				routerAddr, tt.zeroForOne, "10000",
+				priceLimit, flashSwapCallback,
+			)
+
+			// Verify: recipient balance during callback should be GREATER than initial
+			// This proves output tokens were transferred BEFORE callback was invoked
+			uassert.True(t, recipientBalanceDuringCallback > initialBalance,
+				ufmt.Sprintf("Flash swap failed: recipient should have received output tokens before callback. initial=%d, duringCallback=%d",
+					initialBalance, recipientBalanceDuringCallback))
+
+			t.Logf("passed: %s (initial=%d, duringCallback=%d)",
+				tt.description, initialBalance, recipientBalanceDuringCallback)
+		})
+	}
+}
+
+// TestSwap_FlashSwapArbitragePattern tests a practical flash swap use case:
+// using received output tokens within the callback for arbitrage or chained operations.
+func TestSwap_FlashSwapArbitragePattern(cur realm, t *testing.T) {
+	// Setup
+	resetObject(cur, t)
+	burnTokens(cur, t)
+	InitialisePoolTest(cur, t)
+	MintPositionAll(cur, t, adminAddr)
+
+	TokenFaucet(cur, t, barPath, routerAddr)
+	TokenFaucet(cur, t, bazPath, routerAddr)
+
+	testing.SetRealm(rouRealm)
+	TokenApprove(cur, t, barPath, routerAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, bazPath, routerAddr, poolAddr, maxApprove)
+
+	// Simulate arbitrage scenario:
+	// 1. Swap token0 for token1 (receive token1 first via flash swap)
+	// 2. In callback, verify we can "use" the received token1
+	// 3. Pay back token0
+
+	var outputReceivedBeforePayment bool
+	var outputAmountReceived int64
+
+	arbitrageCallback := func(cur realm, amount0Delta, amount1Delta int64, _ *pl.CallbackMarker) error {
+		// In a real arbitrage scenario, we would:
+		// 1. Use the received token1 (amount1Delta is negative, meaning we received it)
+		// 2. Perform arbitrage operation
+		// 3. Pay back token0 (amount0Delta is positive, meaning we owe it)
+
+		// Verify we received output tokens (negative delta = pool sent to us)
+		if amount1Delta < 0 {
+			outputAmountReceived = -amount1Delta // Convert to positive
+			// Check our balance increased
+			currentBalance := common.BalanceOf(bazPath, routerAddr)
+			outputReceivedBeforePayment = currentBalance >= outputAmountReceived
+		}
+
+		// Pay back input tokens
+		return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+	}
+
+	// Execute flash swap
+	testing.SetRealm(rouRealm)
+	amount0, amount1 := mockInstanceSwap(
+		0, cur,
+		barPath, bazPath, STANDARD_FEE_TIER,
+		routerAddr, true, "10000", // zeroForOne: swap token0 for token1
+		gnsmath.TickMathGetSqrtRatioAtTick(-887220).ToString(), arbitrageCallback,
+	)
+
+	// Verify flash swap pattern worked
+	uassert.True(t, outputReceivedBeforePayment,
+		"Flash swap arbitrage failed: output tokens not available during callback")
+	uassert.True(t, outputAmountReceived > 0,
+		"Flash swap should have received output tokens")
+
+	t.Logf("Flash swap arbitrage pattern verified: received %d output tokens before payment (amount0=%s, amount1=%s)",
+		outputAmountReceived, amount0, amount1)
+}

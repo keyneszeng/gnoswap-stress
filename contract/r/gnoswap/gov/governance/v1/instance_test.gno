@@ -1,0 +1,287 @@
+package governance
+
+import (
+	"testing"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	uassert "gno.land/p/nt/uassert/v0"
+	"gno.land/r/gnoswap/gov/governance"
+)
+
+// TestInstance_NewGovernanceV1 tests the creation of governance v1 instance
+func TestInstance_NewGovernanceV1(cur realm, t *testing.T) {
+	// given
+	store := createMockGovernanceStore()
+
+	// when
+	impl := NewGovernanceV1(store, newMockGovStakerAccessor())
+
+	// then
+	uassert.NotNil(t, impl)
+
+	// Verify it implements IGovernance interface
+	_, ok := impl.(governance.IGovernance)
+	uassert.True(t, ok)
+
+	// Verify internal structure by type assertion
+	gv, ok := impl.(*governanceV1)
+	uassert.True(t, ok)
+	uassert.NotNil(t, gv.store)
+
+	// Verify store methods are accessible
+	counter := gv.store.GetProposalCounter()
+	uassert.NotNil(t, counter)
+}
+
+// TestInstance_RemoveInactiveUserProposals tests the removeInactiveUserProposals function
+func TestInstance_RemoveInactiveUserProposals(cur realm, t *testing.T) {
+	config := governance.NewConfig(100, 200, 0, 50, 0, 100, 200)
+
+	proposerAddr := testutils.TestAddress("proposer")
+	baseCreatedAt := int64(1000)
+	expiredTime := baseCreatedAt + config.VotingStartDelay + config.VotingPeriod + config.ExecutionDelay + config.ExecutionWindow
+
+	tests := []struct {
+		name                   string
+		setup                  func(cur realm, gv *governanceV1)
+		currentTime            int64
+		expectedRemainingCount int
+		expectedRemainingIDs   []int64
+		expectedHasActive      bool
+	}{
+		{
+			name:                   "No proposals for user",
+			setup:                  func(cur realm, gv *governanceV1) {},
+			currentTime:            baseCreatedAt,
+			expectedRemainingCount: 0,
+			expectedRemainingIDs:   nil,
+			expectedHasActive:      false,
+		},
+		{
+			name: "Upcoming proposal should remain active",
+			setup: func(cur realm, gv *governanceV1) {
+				proposal := governance.NewProposal(
+					1,
+					NewProposalStatus(
+						config, 1000, false, baseCreatedAt,
+						1000,
+					),
+					governance.NewProposalMetadata("Test Title", "Test Description"),
+					NewProposalTextData(),
+					proposerAddr, 1, baseCreatedAt,
+					100,
+				)
+				gv.addProposal(0, cur, proposal)
+			},
+			currentTime:            baseCreatedAt + config.VotingStartDelay - 10,
+			expectedRemainingCount: 1,
+			expectedRemainingIDs:   []int64{1},
+			expectedHasActive:      true,
+		},
+		{
+			name: "All proposals are active - none should be removed",
+			setup: func(cur realm, gv *governanceV1) {
+				proposal := governance.NewProposal(
+					1,
+					NewProposalStatus(
+						config, 1000, false, baseCreatedAt,
+						1000,
+					),
+					governance.NewProposalMetadata("Test Title", "Test Description"),
+					NewProposalTextData(),
+					proposerAddr, 1, baseCreatedAt,
+					100,
+				)
+				gv.addProposal(0, cur, proposal)
+			},
+			currentTime:            baseCreatedAt + config.VotingStartDelay + 50, // during voting period
+			expectedRemainingCount: 1,
+			expectedRemainingIDs:   []int64{1},
+			expectedHasActive:      true,
+		},
+		{
+			name: "All proposals are expired - all should be removed",
+			setup: func(cur realm, gv *governanceV1) {
+				proposal := governance.NewProposal(
+					1,
+					NewProposalStatus(
+						config, 1000, false, baseCreatedAt,
+						1000,
+					),
+					governance.NewProposalMetadata("Test Title", "Test Description"),
+					NewProposalTextData(),
+					proposerAddr, 1, baseCreatedAt,
+					100,
+				)
+				gv.addProposal(0, cur, proposal)
+			},
+			currentTime:            expiredTime + 100, // after expired
+			expectedRemainingCount: 0,
+			expectedRemainingIDs:   nil,
+			expectedHasActive:      false,
+		},
+		{
+			name: "Mixed active and inactive proposals - only inactive should be removed",
+			setup: func(cur realm, gv *governanceV1) {
+				// Expired proposal
+				oldProposal := governance.NewProposal(
+					1,
+					NewProposalStatus(
+						config, 1000, false, baseCreatedAt,
+						1000,
+					),
+					governance.NewProposalMetadata("Old Title", "Old Description"),
+					NewProposalTextData(),
+					proposerAddr, 1, baseCreatedAt,
+					100,
+				)
+				gv.addProposal(0, cur, oldProposal)
+
+				// Active proposal (created after first one expired)
+				newCreatedAt := expiredTime + 50
+				newProposal := governance.NewProposal(
+					2,
+					NewProposalStatus(
+						config, 1000, false, newCreatedAt,
+						1000,
+					),
+					governance.NewProposalMetadata("New Title", "New Description"),
+					NewProposalTextData(),
+					proposerAddr, 1, newCreatedAt,
+					100,
+				)
+				gv.addProposal(0, cur, newProposal)
+			},
+			currentTime:            expiredTime + 50 + config.VotingStartDelay + 50, // during new proposal's voting period
+			expectedRemainingCount: 1,
+			expectedRemainingIDs:   []int64{2},
+			expectedHasActive:      true,
+		},
+		{
+			name: "Canceled proposal should be removed",
+			setup: func(cur realm, gv *governanceV1) {
+				proposal := governance.NewProposal(
+					1,
+					NewProposalStatus(
+						config, 1000, true, baseCreatedAt,
+						1000,
+					),
+					governance.NewProposalMetadata("Test Title", "Test Description"),
+					NewProposalTextData(),
+					proposerAddr, 1, baseCreatedAt,
+					100,
+				)
+				gv.addProposal(0, cur, proposal)
+
+				// Cancel the proposal
+				proposalResolver := NewProposalResolver(proposal)
+				_ = proposalResolver.cancel(baseCreatedAt+50, 100, proposerAddr)
+			},
+			currentTime:            baseCreatedAt + 50,
+			expectedRemainingCount: 0,
+			expectedRemainingIDs:   nil,
+			expectedHasActive:      false,
+		},
+		{
+			name: "Executable proposal should remain active",
+			setup: func(cur realm, gv *governanceV1) {
+				proposal := governance.NewProposal(
+					1,
+					NewProposalStatus(
+						config, 1000, true, baseCreatedAt,
+						1000,
+					),
+					governance.NewProposalMetadata("Test Title", "Test Description"),
+					NewProposalCommunityPoolSpendData(
+						"gno.land/r/gnoswap/gns.GNS",
+						testutils.TestAddress("recipient"),
+						100,
+						"gno.land/r/gnoswap/community_pool",
+					),
+					proposerAddr, 1, baseCreatedAt,
+					100,
+				)
+
+				proposalResolver := NewProposalResolver(proposal)
+				_ = proposalResolver.Vote(true, 600)
+
+				gv.addProposal(0, cur, proposal)
+			},
+			currentTime:            baseCreatedAt + config.VotingStartDelay + config.VotingPeriod + config.ExecutionDelay + 50,
+			expectedRemainingCount: 1,
+			expectedRemainingIDs:   []int64{1},
+			expectedHasActive:      true,
+		},
+		{
+			name: "Multiple expired proposals - all should be removed",
+			setup: func(cur realm, gv *governanceV1) {
+				for i := int64(1); i <= 3; i++ {
+					proposal := governance.NewProposal(
+						i,
+						NewProposalStatus(
+							config, 1000, false, baseCreatedAt,
+							1000,
+						),
+						governance.NewProposalMetadata("Test Title", "Test Description"),
+						NewProposalTextData(),
+						proposerAddr, 1, baseCreatedAt,
+						100,
+					)
+					gv.addProposal(0, cur, proposal)
+				}
+			},
+			currentTime:            expiredTime + 100,
+			expectedRemainingCount: 0,
+			expectedRemainingIDs:   nil,
+			expectedHasActive:      false,
+		},
+		{
+			name: "Multiple active proposals - none should be removed",
+			setup: func(cur realm, gv *governanceV1) {
+				for i := int64(1); i <= 3; i++ {
+					proposal := governance.NewProposal(
+						i,
+						NewProposalStatus(
+							config, 1000, false, baseCreatedAt,
+							1000,
+						),
+						governance.NewProposalMetadata("Test Title", "Test Description"),
+						NewProposalTextData(),
+						proposerAddr, 1, baseCreatedAt,
+						100,
+					)
+					gv.addProposal(0, cur, proposal)
+				}
+			},
+			currentTime:            baseCreatedAt + config.VotingStartDelay + 50, // during voting period
+			expectedRemainingCount: 3,
+			expectedRemainingIDs:   []int64{1, 2, 3},
+			expectedHasActive:      true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(cur realm, t *testing.T) {
+			// given
+			gv := newMockGovernance()
+			tc.setup(cur, gv)
+
+			// when
+			err := gv.removeInactiveUserProposals(0, cur, proposerAddr, tc.currentTime)
+
+			// then
+			uassert.Nil(t, err)
+
+			proposals := gv.getUserProposals(proposerAddr.String())
+			uassert.Equal(t, len(proposals), tc.expectedRemainingCount)
+			uassert.Equal(t, gv.hasActiveProposal(proposerAddr), tc.expectedHasActive)
+
+			// Verify remaining proposal IDs
+			if tc.expectedRemainingIDs != nil {
+				for i, expectedID := range tc.expectedRemainingIDs {
+					uassert.Equal(t, proposals[i].ID(), expectedID)
+				}
+			}
+		})
+	}
+}

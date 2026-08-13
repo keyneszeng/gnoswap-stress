@@ -1,0 +1,234 @@
+// staker NFT transfer scenario test 01
+// User 'A' mints NFT
+// User 'A' stakes NFT
+// User 'A' can not transfer NFT to 'B'
+// User 'A' can collect reward
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"strconv"
+	"testing"
+	"time"
+
+	"gno.land/p/gnoswap/gnsmath"
+	"gno.land/r/gnoswap/scenarioutils"
+
+	"gno.land/p/demo/tokens/grc721"
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/emission"
+
+	"gno.land/r/gnoswap/gnft"
+	"gno.land/r/gnoswap/gns"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	sr "gno.land/r/gnoswap/staker"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/qux"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminUser    = adminAddr
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	stakerAddr, _ = access.GetAddress(prabc.ROLE_STAKER.String())
+	stakerUser    = stakerAddr
+	stakerRealm   = testing.NewCodeRealm("gno.land/r/gnoswap/staker")
+
+	poolAddr, _ = access.GetAddress(prabc.ROLE_POOL.String())
+
+	dummyAddr  = testutils.TestAddress("dummy")
+	dummyRealm = testing.NewUserRealm(dummyAddr)
+
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	quxPath = "gno.land/r/onbloc/qux.QUX"
+
+	fee500 uint32 = 500
+
+	maxTimeout int64 = 9999999999
+	maxInt64   int64 = 9223372036854775807
+
+	t *testing.T
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Initialize account and emission")
+	initAccountAndEmission(cur)
+	println()
+
+	println("[SCENARIO] 2. Create bar:qux:500 pool")
+	createPool(cur)
+	println()
+
+	println("[SCENARIO] 3. Mint position 01")
+	mintPosition01(cur)
+	println()
+
+	println("[SCENARIO] 4. Stake position 01")
+	stakePosition01(cur)
+	println()
+
+	println("[SCENARIO] 5. Collect reward")
+	collectReward(cur)
+}
+
+func initAccountAndEmission(cur realm) {
+	testing.SetRealm(adminRealm)
+	scenarioutils.EnsureCanonicalDefaultPool(cross(cur))
+	emission.SetDistributionStartTime(cross(cur), time.Now().Unix()+1)
+
+	println("[INFO] set unstaking fee to 0")
+	sr.SetUnStakingFee(cross(cur), 0)
+
+	println("[INFO] set pool creation fee to 0")
+	pl.SetPoolCreationFee(cross(cur), 0)
+
+	println("[INFO] register gns change callback")
+	testing.SetRealm(stakerRealm)
+}
+
+func createPool(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] create bar:qux:500 pool")
+	pl.CreatePool(cross(cur), barPath, quxPath, 500, gnsmath.TickMathGetSqrtRatioAtTick(10000).ToString()) // tick 10_000 ≈ x2.7
+
+	println("[INFO] set pool to tier 1")
+	sr.SetPoolTier(cross(cur), "gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/qux.QUX:500", 1)
+
+	testing.SkipHeights(1)
+}
+
+func mintPosition01(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve tokens for minting")
+	bar.Approve(cross(cur), poolAddr, maxInt64)
+	qux.Approve(cross(cur), poolAddr, maxInt64)
+	testing.SkipHeights(2)
+
+	println("[INFO] mint position 01 (tick range: 9000 ~ 11000)")
+	positionId, liquidity, amount0, amount1 := pn.Mint(
+		cross(cur),
+		barPath,
+		quxPath,
+		fee500,
+		int32(9000),
+		int32(11000),
+		"1000",
+		"1000",
+		"1",
+		"1",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position ID: %d\n", positionId)
+	ufmt.Printf("[EXPECTED] liquidity: %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] amount0: %s, amount1: %s\n", amount0, amount1)
+
+	owner := gnft.MustOwnerOf(positionIdFrom(cur, positionId))
+	ufmt.Printf("[EXPECTED] position owner: %s\n", owner)
+
+	testing.SkipHeights(1)
+}
+
+func stakePosition01(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve NFT to staker")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, 1))
+	testing.SkipHeights(1)
+
+	println("[INFO] stake position 01")
+	sr.StakeToken(cross(cur), 1, "")
+	testing.SkipHeights(1)
+
+	owner := gnft.MustOwnerOf(positionIdFrom(cur, 1))
+	ufmt.Printf("[EXPECTED] NFT owner after staking: %s\n", owner)
+
+	if owner != stakerAddr {
+		panic("NFT should be owned by staker after staking")
+	}
+}
+
+func collectReward(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] collect reward for position 01")
+	beforeGns := gns.BalanceOf(adminUser)
+
+	testing.SkipHeights(5) // Skip some blocks to accumulate rewards
+	sr.CollectReward(cross(cur), 1)
+
+	afterGns := gns.BalanceOf(adminUser)
+	rewardAmount := afterGns - beforeGns
+
+	ufmt.Printf("[EXPECTED] reward collected: %d\n", rewardAmount)
+
+	if rewardAmount <= 0 {
+		panic("should have received some reward")
+	}
+}
+
+func positionIdFrom(cur realm, positionId any) grc721.TokenID {
+	if positionId == nil {
+		panic("positionId is nil")
+	}
+
+	switch positionId.(type) {
+	case string:
+		return grc721.TokenID(positionId.(string))
+	case int:
+		return grc721.TokenID(strconv.Itoa(positionId.(int)))
+	case uint64:
+		return grc721.TokenID(strconv.Itoa(int(positionId.(uint64))))
+	case grc721.TokenID:
+		return positionId.(grc721.TokenID)
+	default:
+		panic("unsupported positionId type")
+	}
+}
+
+// Output:
+// [SCENARIO] 1. Initialize account and emission
+// [INFO] set unstaking fee to 0
+// [INFO] set pool creation fee to 0
+// [INFO] register gns change callback
+//
+// [SCENARIO] 2. Create bar:qux:500 pool
+// [INFO] create bar:qux:500 pool
+// [INFO] set pool to tier 1
+//
+// [SCENARIO] 3. Mint position 01
+// [INFO] approve tokens for minting
+// [INFO] mint position 01 (tick range: 9000 ~ 11000)
+// [EXPECTED] position ID: 1
+// [EXPECTED] liquidity: 12437
+// [EXPECTED] amount0: 368, amount1: 1000
+// [EXPECTED] position owner: g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5
+//
+// [SCENARIO] 4. Stake position 01
+// [INFO] approve NFT to staker
+// [INFO] stake position 01
+// [EXPECTED] NFT owner after staking: g1q6d4ns7zkr492rgl0pcgf5ajaf2dlz0nnptky3
+//
+// [SCENARIO] 5. Collect reward
+// [INFO] collect reward for position 01
+// [EXPECTED] reward collected: 24079616

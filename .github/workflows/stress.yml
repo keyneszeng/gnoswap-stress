@@ -1,0 +1,62 @@
+name: GnoSwap Stress Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      pkg:
+        description: "Package path to stress-test"
+        required: false
+        default: "gno.land/r/gnoswap/pool/v1"
+      run:
+        description: "Test name filter (regex)"
+        required: false
+        default: "TestStress_"
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout gnoswap contracts
+        uses: actions/checkout@v4
+        with:
+          path: gnoswap
+
+      - name: Checkout gno toolchain (gnoswap-labs fork, master)
+        uses: actions/checkout@v4
+        with:
+          repository: gnoswap-labs/gno
+          ref: master
+          path: gno
+          # master fork matches contract gnomod gno="0.9" requirement
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Build gno tools
+        working-directory: gno
+        run: |
+          make install.gno
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Run stress tests
+        working-directory: gnoswap
+        env:
+          GNO_TOOLS: "$HOME/go/bin"
+        run: |
+          export PATH="$HOME/go/bin:$PATH"
+          # symlink contract tree so gno test resolves gno.land/r/gnoswap/*
+          mkdir -p "$HOME/gno/src"
+          ln -sfn "$(pwd)/contract/r/gnoswap" "$HOME/gno/src/gnoswap" 2>/dev/null || true
+          gno test -v -run "${{ github.event.inputs.run }}" "./${{ github.event.inputs.pkg }}" 2>&1 | tee stress.log
+          echo "=== STRESS RESULT ==="
+          grep -E "^(ok|FAIL|PASS|---)" stress.log | tail -40
+
+      - name: Upload stress report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnoswap-stress-report
+          path: gnoswap/stress.log

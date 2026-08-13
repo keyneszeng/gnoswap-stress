@@ -1,0 +1,409 @@
+// Scenario: Swap Balance Validation - In Range Position
+// Purpose: Validate balance changes with in-range position swaps that cause price movement
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"gno.land/p/gnoswap/gnsmath"
+	"testing"
+	"time"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/r/gnoswap/access"
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	"gno.land/r/gnoswap/router"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/foo"
+)
+
+var (
+	adminAddr, _       = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminRealm         = testing.NewUserRealm(adminAddr)
+	poolAddr, _        = access.GetAddress(prabc.ROLE_POOL.String())
+	routerAddr, _      = access.GetAddress(prabc.ROLE_ROUTER.String())
+	protocolFeeAddr, _ = access.GetAddress(prabc.ROLE_PROTOCOL_FEE.String())
+
+	userAddr  = testutils.TestAddress("user")
+	userRealm = testing.NewUserRealm(userAddr)
+
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	fooPath = "gno.land/r/onbloc/foo.FOO"
+
+	fee500 uint32 = 500
+
+	max_timeout int64 = 9999999999
+	max_approve int64 = 9223372036854775806
+
+	initialBalance int64 = 100_000_000_000
+)
+
+type BalanceSnapshot struct {
+	userBar        int64
+	userFoo        int64
+	poolBar        int64
+	poolFoo        int64
+	routerBar      int64
+	routerFoo      int64
+	protocolFeeBar int64
+	protocolFeeFoo int64
+}
+
+func main(cur realm) {
+	println("[SCENARIO] Swap Balance Validation - In Range Position")
+	println("[INFO] Purpose: Validate balance changes with in-range position swaps")
+	println()
+
+	println("[SCENARIO] 1. Initial Setup")
+	initial := setupEnvironment(cur)
+	printBalanceSnapshot(cur, "Initial State", initial)
+	println()
+
+	println("[SCENARIO] 2. Create Pool")
+	afterPool := createPool(cur)
+	printBalanceSnapshot(cur, "After Pool Creation", afterPool)
+	println()
+
+	println("[SCENARIO] 3. Mint In-Range Position")
+	afterMint := mintInRangePosition(cur)
+	printBalanceSnapshot(cur, "After Position Mint", afterMint)
+	println()
+
+	println("[SCENARIO] 4. Exact In Swap (FOO -> BAR)")
+	afterExactIn := performExactInSwap(cur)
+	printBalanceSnapshot(cur, "After Exact In Swap", afterExactIn)
+	validateBalanceChange(cur, afterMint, afterExactIn, "ExactIn")
+	println()
+
+	println("[SCENARIO] 5. Exact Out Swap (BAR -> FOO)")
+	afterExactOut := performExactOutSwap(cur)
+	printBalanceSnapshot(cur, "After Exact Out Swap", afterExactOut)
+	validateBalanceChange(cur, afterExactIn, afterExactOut, "ExactOut")
+	println()
+
+	println("[SCENARIO] 6. System Balance Conservation Check")
+	validateSystemBalance(cur, initial, afterExactOut)
+	println()
+
+	println("[SCENARIO] Complete - All balance validations passed")
+}
+
+func getBalanceSnapshot(cur realm) BalanceSnapshot {
+	snapshot := BalanceSnapshot{
+		userBar:        bar.BalanceOf(userAddr),
+		userFoo:        foo.BalanceOf(userAddr),
+		poolBar:        bar.BalanceOf(poolAddr),
+		poolFoo:        foo.BalanceOf(poolAddr),
+		routerBar:      bar.BalanceOf(routerAddr),
+		routerFoo:      foo.BalanceOf(routerAddr),
+		protocolFeeBar: bar.BalanceOf(protocolFeeAddr),
+		protocolFeeFoo: foo.BalanceOf(protocolFeeAddr),
+	}
+
+	return snapshot
+}
+
+func printBalanceSnapshot(cur realm, step string, snapshot BalanceSnapshot) {
+	println("[INFO]", step)
+	println("[EXPECTED] User BAR balance:", snapshot.userBar)
+	println("[EXPECTED] User FOO balance:", snapshot.userFoo)
+	println("[EXPECTED] Pool BAR balance:", snapshot.poolBar)
+	println("[EXPECTED] Pool FOO balance:", snapshot.poolFoo)
+	println("[EXPECTED] Router BAR balance:", snapshot.routerBar)
+	println("[EXPECTED] Router FOO balance:", snapshot.routerFoo)
+	println("[EXPECTED] Protocol fee BAR balance:", snapshot.protocolFeeBar)
+	println("[EXPECTED] Protocol fee FOO balance:", snapshot.protocolFeeFoo)
+}
+
+func setupEnvironment(cur realm) BalanceSnapshot {
+	testing.SetRealm(adminRealm)
+	pl.SetPoolCreationFee(cross(cur), 0)
+
+	bar.Transfer(cross(cur), userAddr, initialBalance)
+	foo.Transfer(cross(cur), userAddr, initialBalance)
+
+	testing.SetRealm(userRealm)
+	return getBalanceSnapshot(cur)
+}
+
+func createPool(cur realm) BalanceSnapshot {
+	testing.SetRealm(userRealm)
+
+	pl.CreatePool(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		gnsmath.TickMathGetSqrtRatioAtTick(0).ToString(),
+	)
+
+	return getBalanceSnapshot(cur)
+}
+
+func mintInRangePosition(cur realm) BalanceSnapshot {
+	testing.SetRealm(userRealm)
+
+	bar.Approve(cross(cur), poolAddr, max_approve)
+	foo.Approve(cross(cur), poolAddr, max_approve)
+
+	// Mint position covering wide range around current price (tick 0)
+	// This ensures the position stays in range during swaps
+	tokenId, liquidity, amount0, amount1 := pn.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		int32(-10000), // tickLower
+		int32(10000),  // tickUpper
+		"50000000000", // amount0Desired (BAR)
+		"50000000000", // amount1Desired (FOO)
+		"0",           // amount0Min
+		"0",           // amount1Min
+		max_timeout,
+		userAddr,
+		"",
+	)
+
+	println("[INFO] Minted position ID:", tokenId)
+	println("[INFO] Liquidity:", liquidity)
+	println("[INFO] Amount0 (BAR):", amount0)
+	println("[INFO] Amount1 (FOO):", amount1)
+
+	return getBalanceSnapshot(cur)
+}
+
+func performExactInSwap(cur realm) BalanceSnapshot {
+	testing.SetRealm(userRealm)
+
+	foo.Approve(cross(cur), routerAddr, max_approve)
+	bar.Approve(cross(cur), routerAddr, max_approve)
+
+	// Swap FOO -> BAR (exact in)
+	// This should increase the price (more FOO in pool, less BAR)
+	swapAmount := int64(10_000_000_000)
+	println("[INFO] Swapping", swapAmount, "FOO -> BAR")
+
+	amountIn, amountOut := router.ExactInSwapRoute(
+		cross(cur),
+		fooPath,
+		barPath,
+		ufmt.Sprintf("%d", swapAmount),
+		"gno.land/r/onbloc/foo.FOO:gno.land/r/onbloc/bar.BAR:500",
+		"100",
+		"1",
+		time.Now().Add(time.Hour).Unix(),
+		"",
+	)
+
+	println("[INFO] Exact In - In:", amountIn, "Out:", amountOut)
+
+	snapshot := getBalanceSnapshot(cur)
+	assertRouterIsEmpty(cur, snapshot)
+	return snapshot
+}
+
+func performExactOutSwap(cur realm) BalanceSnapshot {
+	testing.SetRealm(userRealm)
+
+	bar.Approve(cross(cur), routerAddr, max_approve)
+	foo.Approve(cross(cur), routerAddr, max_approve)
+
+	// Swap BAR -> FOO (exact out)
+	// This should decrease the price (more BAR in pool, less FOO)
+	swapAmount := int64(5_000_000_000)
+	println("[INFO] Swapping BAR ->", swapAmount, "FOO")
+
+	amountIn, amountOut := router.ExactOutSwapRoute(
+		cross(cur),
+		barPath,
+		fooPath,
+		ufmt.Sprintf("%d", swapAmount),
+		"gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/foo.FOO:500",
+		"100",
+		ufmt.Sprintf("%d", max_approve),
+		time.Now().Add(time.Hour).Unix(),
+		"",
+	)
+
+	println("[INFO] Exact Out - In:", amountIn, "Out:", amountOut)
+
+	snapshot := getBalanceSnapshot(cur)
+	assertRouterIsEmpty(cur, snapshot)
+	return snapshot
+}
+
+func validateBalanceChange(cur realm, before, after BalanceSnapshot, swapType string) {
+	println("[INFO] Validating balance changes for", swapType)
+
+	// User balance should change (tokens swapped)
+	userBarDiff := after.userBar - before.userBar
+	userFooDiff := after.userFoo - before.userFoo
+
+	// Pool balance should change (opposite of user)
+	poolBarDiff := after.poolBar - before.poolBar
+	poolFooDiff := after.poolFoo - before.poolFoo
+
+	protocolFeeBarDiff := after.protocolFeeBar - before.protocolFeeBar
+	protocolFeeFooDiff := after.protocolFeeFoo - before.protocolFeeFoo
+
+	println("[EXPECTED] User BAR change:", userBarDiff)
+	println("[EXPECTED] User FOO change:", userFooDiff)
+	println("[EXPECTED] Pool BAR change:", poolBarDiff)
+	println("[EXPECTED] Pool FOO change:", poolFooDiff)
+	println("[EXPECTED] Protocol Fee BAR change:", protocolFeeBarDiff)
+	println("[EXPECTED] Protocol Fee FOO change:", protocolFeeFooDiff)
+
+	// Router should have zero balance after swap (no stuck funds)
+	assertRouterIsEmpty(cur, after)
+
+	// Exact conservation: user + pool + protocol fee changes must sum to 0
+	totalBarChange := userBarDiff + poolBarDiff + protocolFeeBarDiff
+	totalFooChange := userFooDiff + poolFooDiff + protocolFeeFooDiff
+
+	if totalBarChange != 0 {
+		panic(ufmt.Sprintf("[ERROR] BAR not conserved in swap! Total change: %d", totalBarChange))
+	}
+	if totalFooChange != 0 {
+		panic(ufmt.Sprintf("[ERROR] FOO not conserved in swap! Total change: %d", totalFooChange))
+	}
+
+	println("[EXPECTED] Exact balance conservation verified for", swapType)
+}
+
+func assertRouterIsEmpty(cur realm, snapshot BalanceSnapshot) {
+	if snapshot.routerBar != 0 {
+		panic(ufmt.Sprintf("[ERROR] Router has BAR balance: %d - funds stuck!", snapshot.routerBar))
+	}
+	if snapshot.routerFoo != 0 {
+		panic(ufmt.Sprintf("[ERROR] Router has FOO balance: %d - funds stuck!", snapshot.routerFoo))
+	}
+}
+
+func validateSystemBalance(cur realm, initial, final BalanceSnapshot) {
+	println("[INFO] Validating system-wide balance conservation")
+
+	// Total supply in system should be conserved
+	// User + Pool + Router + ProtocolFee = Initial Supply
+	totalBarInitial := initial.userBar + initial.poolBar + initial.routerBar + initial.protocolFeeBar
+	totalBarFinal := final.userBar + final.poolBar + final.routerBar + final.protocolFeeBar
+
+	totalFooInitial := initial.userFoo + initial.poolFoo + initial.routerFoo + initial.protocolFeeFoo
+	totalFooFinal := final.userFoo + final.poolFoo + final.routerFoo + final.protocolFeeFoo
+
+	println("[EXPECTED] Total BAR - Initial:", totalBarInitial, "Final:", totalBarFinal)
+	println("[EXPECTED] Total FOO - Initial:", totalFooInitial, "Final:", totalFooFinal)
+
+	if totalBarInitial != totalBarFinal {
+		panic("[ERROR] BAR tokens were created or destroyed!")
+	}
+
+	if totalFooInitial != totalFooFinal {
+		panic("[ERROR] FOO tokens were created or destroyed!")
+	}
+
+	println("[EXPECTED] System-wide balance perfectly conserved")
+}
+
+// Output:
+// [SCENARIO] Swap Balance Validation - In Range Position
+// [INFO] Purpose: Validate balance changes with in-range position swaps
+//
+// [SCENARIO] 1. Initial Setup
+// [INFO] Initial State
+// [EXPECTED] User BAR balance: 100000000000
+// [EXPECTED] User FOO balance: 100000000000
+// [EXPECTED] Pool BAR balance: 0
+// [EXPECTED] Pool FOO balance: 0
+// [EXPECTED] Router BAR balance: 0
+// [EXPECTED] Router FOO balance: 0
+// [EXPECTED] Protocol fee BAR balance: 0
+// [EXPECTED] Protocol fee FOO balance: 0
+//
+// [SCENARIO] 2. Create Pool
+// [INFO] After Pool Creation
+// [EXPECTED] User BAR balance: 100000000000
+// [EXPECTED] User FOO balance: 100000000000
+// [EXPECTED] Pool BAR balance: 0
+// [EXPECTED] Pool FOO balance: 0
+// [EXPECTED] Router BAR balance: 0
+// [EXPECTED] Router FOO balance: 0
+// [EXPECTED] Protocol fee BAR balance: 0
+// [EXPECTED] Protocol fee FOO balance: 0
+//
+// [SCENARIO] 3. Mint In-Range Position
+// [INFO] Minted position ID: 1
+// [INFO] Liquidity: 127079601172
+// [INFO] Amount0 (BAR): 50000000000
+// [INFO] Amount1 (FOO): 50000000000
+// [INFO] After Position Mint
+// [EXPECTED] User BAR balance: 50000000000
+// [EXPECTED] User FOO balance: 50000000000
+// [EXPECTED] Pool BAR balance: 50000000000
+// [EXPECTED] Pool FOO balance: 50000000000
+// [EXPECTED] Router BAR balance: 0
+// [EXPECTED] Router FOO balance: 0
+// [EXPECTED] Protocol fee BAR balance: 0
+// [EXPECTED] Protocol fee FOO balance: 0
+//
+// [SCENARIO] 4. Exact In Swap (FOO -> BAR)
+// [INFO] Swapping 10000000000 FOO -> BAR
+// [INFO] Exact In - In: 10000000000 Out: -9252300294
+// [INFO] After Exact In Swap
+// [EXPECTED] User BAR balance: 59252300294
+// [EXPECTED] User FOO balance: 40000000000
+// [EXPECTED] Pool BAR balance: 40733800407
+// [EXPECTED] Pool FOO balance: 60000000000
+// [EXPECTED] Router BAR balance: 0
+// [EXPECTED] Router FOO balance: 0
+// [EXPECTED] Protocol fee BAR balance: 13899299
+// [EXPECTED] Protocol fee FOO balance: 0
+// [INFO] Validating balance changes for ExactIn
+// [EXPECTED] User BAR change: 9252300294
+// [EXPECTED] User FOO change: -10000000000
+// [EXPECTED] Pool BAR change: -9266199593
+// [EXPECTED] Pool FOO change: 10000000000
+// [EXPECTED] Protocol Fee BAR change: 13899299
+// [EXPECTED] Protocol Fee FOO change: 0
+// [EXPECTED] Exact balance conservation verified for ExactIn
+//
+// [SCENARIO] 5. Exact Out Swap (BAR -> FOO)
+// [INFO] Swapping BAR -> 5000000000 FOO
+// [INFO] Exact Out - In: 4469297080 Out: -5000000000
+// [INFO] After Exact Out Swap
+// [EXPECTED] User BAR balance: 54783003214
+// [EXPECTED] User FOO balance: 45000000000
+// [EXPECTED] Pool BAR balance: 45203097487
+// [EXPECTED] Pool FOO balance: 54992488734
+// [EXPECTED] Router BAR balance: 0
+// [EXPECTED] Router FOO balance: 0
+// [EXPECTED] Protocol fee BAR balance: 13899299
+// [EXPECTED] Protocol fee FOO balance: 7511266
+// [INFO] Validating balance changes for ExactOut
+// [EXPECTED] User BAR change: -4469297080
+// [EXPECTED] User FOO change: 5000000000
+// [EXPECTED] Pool BAR change: 4469297080
+// [EXPECTED] Pool FOO change: -5007511266
+// [EXPECTED] Protocol Fee BAR change: 0
+// [EXPECTED] Protocol Fee FOO change: 7511266
+// [EXPECTED] Exact balance conservation verified for ExactOut
+//
+// [SCENARIO] 6. System Balance Conservation Check
+// [INFO] Validating system-wide balance conservation
+// [EXPECTED] Total BAR - Initial: 100000000000 Final: 100000000000
+// [EXPECTED] Total FOO - Initial: 100000000000 Final: 100000000000
+// [EXPECTED] System-wide balance perfectly conserved
+//
+// [SCENARIO] Complete - All balance validations passed

@@ -1,0 +1,127 @@
+// PKGPATH: gno.land/r/demo/main
+package main
+
+import (
+	"testing"
+
+	"gno.land/r/gnoswap/access"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	pf "gno.land/r/gnoswap/protocol_fee"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/qux"
+)
+
+var (
+	adminAddr, _       = access.GetAddress(prbac.ROLE_ADMIN.String())
+	protocolFeeAddr, _ = access.GetAddress(prbac.ROLE_PROTOCOL_FEE.String())
+	stakerAddr, _      = access.GetAddress(prbac.ROLE_STAKER.String())
+	govStakerAddr, _   = access.GetAddress(prbac.ROLE_GOV_STAKER.String())
+	devOpsAddr, _      = access.GetAddress(prbac.ROLE_DEVOPS.String())
+)
+
+var (
+	adminRealm     = testing.NewUserRealm(adminAddr)
+	stakerRealm    = testing.NewCodeRealm("gno.land/r/gnoswap/staker")
+	govStakerRealm = testing.NewCodeRealm("gno.land/r/gnoswap/gov/staker")
+	protocolFeeV1Realm = testing.NewCodeRealm("gno.land/r/gnoswap/protocol_fee/v1")
+)
+
+func fundAndApproveBarFromStaker(cur realm, amount int64) {
+	testing.SetRealm(adminRealm)
+	bar.Transfer(cross(cur), stakerRealm.Address(), amount)
+	testing.SetRealm(stakerRealm)
+	bar.Approve(cross(cur), protocolFeeAddr, amount)
+	bar.Approve(cross(cur), protocolFeeV1Realm.Address(), amount)
+}
+
+func fundAndApproveQuxFromStaker(cur realm, amount int64) {
+	testing.SetRealm(adminRealm)
+	qux.Transfer(cross(cur), stakerRealm.Address(), amount)
+	testing.SetRealm(stakerRealm)
+	qux.Approve(cross(cur), protocolFeeAddr, amount)
+	qux.Approve(cross(cur), protocolFeeV1Realm.Address(), amount)
+}
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Setup: Transfer tokens to protocol fee")
+	setupTokens(cur)
+	println()
+
+	println("[SCENARIO] 2. Record protocol fees")
+	recordProtocolFees(cur)
+	println()
+
+	println("[SCENARIO] 3. Distribute protocol fees")
+	distributeProtocolFees(cur)
+	println()
+
+	recordProtocolFeesAfterDistribution(cur)
+}
+
+func setupTokens(cur realm) {
+	println("[INFO] Funding and approving bar tokens from staker")
+	fundAndApproveBarFromStaker(cur, 2000)
+
+	println("[INFO] Funding and approving qux tokens from staker")
+	fundAndApproveQuxFromStaker(cur, 2000)
+
+	println("[EXPECTED] Bar balance of protocol_fee:", bar.BalanceOf(protocolFeeAddr))
+	println("[EXPECTED] Qux balance of protocol_fee:", qux.BalanceOf(protocolFeeAddr))
+}
+
+func recordProtocolFees(cur realm) {
+	testing.SetRealm(stakerRealm)
+	bar.Approve(cross(cur), protocolFeeAddr, 1000)
+	qux.Approve(cross(cur), protocolFeeAddr, 1000)
+
+	println("[INFO] Recording bar protocol fee")
+	pf.AddToProtocolFee(cross(cur), "gno.land/r/onbloc/bar.BAR", 1000)
+
+	println("[INFO] Recording qux protocol fee")
+	pf.AddToProtocolFee(cross(cur), "gno.land/r/onbloc/qux.QUX", 1000)
+}
+
+func distributeProtocolFees(cur realm) {
+	testing.SetRealm(govStakerRealm)
+
+	println("[INFO] Distributing protocol fees")
+	pf.DistributeProtocolFee(cross(cur))
+
+	println("[EXPECTED] Bar balance of protocol_fee after distribution:", bar.BalanceOf(protocolFeeAddr))
+	println("[EXPECTED] Bar balance of govStaker after distribution:", bar.BalanceOf(govStakerAddr))
+	println("[EXPECTED] Qux balance of protocol_fee after distribution:", qux.BalanceOf(protocolFeeAddr))
+	println("[EXPECTED] Qux balance of govStaker after distribution:", qux.BalanceOf(govStakerAddr))
+}
+
+func recordProtocolFeesAfterDistribution(cur realm) {
+	testing.SetRealm(stakerRealm)
+	bar.Approve(cross(cur), protocolFeeAddr, 1000)
+	qux.Approve(cross(cur), protocolFeeAddr, 1000)
+
+	// Re-adding a token after distribution must not panic after its reservation is removed.
+	pf.AddToProtocolFee(cross(cur), "gno.land/r/onbloc/bar.BAR", 1000)
+	pf.AddToProtocolFee(cross(cur), "gno.land/r/onbloc/qux.QUX", 1000)
+}
+
+// Output:
+// [SCENARIO] 1. Setup: Transfer tokens to protocol fee
+// [INFO] Funding and approving bar tokens from staker
+// [INFO] Funding and approving qux tokens from staker
+// [EXPECTED] Bar balance of protocol_fee: 0
+// [EXPECTED] Qux balance of protocol_fee: 0
+//
+// [SCENARIO] 2. Record protocol fees
+// [INFO] Recording bar protocol fee
+// [INFO] Recording qux protocol fee
+//
+// [SCENARIO] 3. Distribute protocol fees
+// [INFO] Distributing protocol fees
+// [EXPECTED] Bar balance of protocol_fee after distribution: 0
+// [EXPECTED] Bar balance of govStaker after distribution: 1000
+// [EXPECTED] Qux balance of protocol_fee after distribution: 0
+// [EXPECTED] Qux balance of govStaker after distribution: 1000

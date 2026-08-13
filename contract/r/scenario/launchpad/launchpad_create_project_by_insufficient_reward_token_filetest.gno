@@ -1,0 +1,116 @@
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+// launchpad create project by insufficient reward token
+
+package main
+
+import (
+	"testing"
+	"time"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	uassert "gno.land/p/nt/uassert/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	"gno.land/r/gnoswap/access"
+
+	"gno.land/r/gnoswap/launchpad"
+	_ "gno.land/r/gnoswap/launchpad/v1"
+
+	"gno.land/r/onbloc/obl"
+)
+
+var t *testing.T
+
+var (
+	adminAddr, _ = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	launchpadAddr, _ = access.GetAddress(prbac.ROLE_LAUNCHPAD.String())
+)
+
+func main(cur realm) {
+	// [SCENARIO] Init environment
+	println("[SCENARIO] 1. Init environment")
+	initEnvironment(cur)
+	println()
+
+	// [SCENARIO] Admin attempts to create project with insufficient reward token
+	println("[SCENARIO] 2. Admin attempts to create project with insufficient reward token")
+	createProjectByInsufficientRewardToken(cur)
+	println()
+}
+
+func initEnvironment(cur realm) {}
+
+// Admin attempts to create project with insufficient reward token
+func createProjectByInsufficientRewardToken(cur realm) {
+	testing.SetOriginCaller(adminAddr)
+
+	oblBalance := obl.BalanceOf(adminAddr)
+
+	projectName := "OBL Launchpad Project"
+	rewardTokenPath := "gno.land/r/onbloc/obl.OBL"
+	recipientAddr := testutils.TestAddress("project-owner")
+	rewardAmount := int64(oblBalance + 1)
+	conditionPath := "gno.land/r/gnoswap/gov/xgns"
+	conditionsAmount := "1000000"
+	tier30Ratio := int64(10)
+	tier90Ratio := int64(20)
+	tier180Ratio := int64(70)
+	startTime := int64(time.Now().Unix() + 604800) // 7 days
+
+	println("[INFO] admin attempting to create project with insufficient reward token")
+	println("[INFO] create project with project name:", projectName)
+	println("[INFO] create project with reward token path:", rewardTokenPath)
+	println("[INFO] create project with recipient:", recipientAddr)
+	println("[INFO] create project with reward amount:", rewardAmount)
+	println("[INFO] create project with conditions token:", conditionPath)
+	println("[INFO] create project with conditions amount:", conditionsAmount)
+	println("[INFO] create project with tier30 ratio:", tier30Ratio)
+	println("[INFO] create project with tier90 ratio:", tier90Ratio)
+	println("[INFO] create project with tier180 ratio:", tier180Ratio)
+	println("[INFO] create project with start time:", startTime)
+
+	testing.SetRealm(adminRealm)
+	obl.Approve(cross(cur), launchpadAddr, int64(rewardAmount))
+
+	expectedPanicMessage := "[GNOSWAP-LAUNCHPAD-008] insufficient balance"
+	uassert.AbortsContains(t, cur, expectedPanicMessage, func() {
+		launchpad.CreateProject(
+			cross(cur),
+			projectName,
+			rewardTokenPath,
+			recipientAddr,
+			rewardAmount,
+			conditionPath,
+			conditionsAmount,
+			tier30Ratio,
+			tier90Ratio,
+			tier180Ratio,
+			startTime,
+		)
+	})
+
+	ufmt.Printf("[EXPECTED] Should abort with insufficient reward token error: %s\n", expectedPanicMessage)
+}
+
+// Output:
+// [SCENARIO] 1. Init environment
+//
+// [SCENARIO] 2. Admin attempts to create project with insufficient reward token
+// [INFO] admin attempting to create project with insufficient reward token
+// [INFO] create project with project name: OBL Launchpad Project
+// [INFO] create project with reward token path: gno.land/r/onbloc/obl.OBL
+// [INFO] create project with recipient: g1wpex76n9vd6z6mmhdejhyh6lta047h6lwfg09t
+// [INFO] create project with reward amount: 100000000000001
+// [INFO] create project with conditions token: gno.land/r/gnoswap/gov/xgns
+// [INFO] create project with conditions amount: 1000000
+// [INFO] create project with tier30 ratio: 10
+// [INFO] create project with tier90 ratio: 20
+// [INFO] create project with tier180 ratio: 70
+// [INFO] create project with start time: 1235172690
+// [EXPECTED] Should abort with insufficient reward token error: [GNOSWAP-LAUNCHPAD-008] insufficient balance

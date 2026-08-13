@@ -1,0 +1,188 @@
+// PKGPATH: gno.land/r/demo/main
+
+package main
+
+import (
+	"testing"
+
+	"gno.land/p/gnoswap/gnsmath"
+
+	uassert "gno.land/p/nt/uassert/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/common"
+	"gno.land/r/gnoswap/pool"
+
+	"gno.land/r/gnoswap/gns"
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/foo"
+)
+
+var t *testing.T
+
+// Constants for fee tiers
+const (
+	fee100 uint32 = 100
+)
+
+// Constants for addresses and approvals
+const (
+	maxApprove int64 = 9223372036854775806
+
+	MAX_INT64 string = "9223372036854775807"
+)
+
+// Variables for test addresses and realms
+var (
+	adminAddr, _    = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm      = testing.NewUserRealm(adminAddr)
+	positionAddr, _ = access.GetAddress(prbac.ROLE_POSITION.String())
+	posRealm        = testing.NewUserRealm(positionAddr)
+	routerAddr, _   = access.GetAddress(prbac.ROLE_ROUTER.String())
+	rouRealm        = testing.NewUserRealm(routerAddr)
+	poolAddr, _     = access.GetAddress(prbac.ROLE_POOL.String())
+)
+
+// Token paths
+var (
+	fooPath = "gno.land/r/onbloc/foo.FOO"
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	bazPath = "gno.land/r/onbloc/baz.BAZ"
+)
+
+// Test variables
+var (
+	tickLower       = int32(9000)
+	tickUpper       = int32(12000)
+	poolCreationFee = int64(100_000_000)
+
+	test_liquidityExpectStr = "10000000000"
+
+	MAX_PRICE string = "1461446703485210103287273052203988822378723970341"
+)
+
+func main(cur realm) {
+	println("[SCENARIO] Limit Order Thru Positive 1 With Fee")
+	println("[INFO] Starting scenario: Limit order thru positive 1 with fee")
+
+	println("[INFO] Setting up pool with specific tick")
+
+	println("[INFO] Approving pool creation fee")
+	println()
+	testing.SetRealm(adminRealm)
+	pool.SetFeeProtocol(cross(cur), 4, 4)
+	gns.Approve(cross(cur), poolAddr, poolCreationFee)
+	pool.CreatePool(cross(cur), barPath, fooPath, fee100, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString())
+
+	foo.Approve(cross(cur), poolAddr, maxApprove)
+	bar.Approve(cross(cur), poolAddr, maxApprove)
+
+	thisPool, _ := pool.GetPool(barPath, fooPath, fee100)
+
+	println("[SCENARIO] 1. Minting position spanning current tick")
+	testing.SetRealm(posRealm)
+	mint0, mint1 := pool.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee100,
+		0,
+		120,
+		test_liquidityExpectStr,
+		adminAddr,
+	)
+
+	println("[INFO] Minted position:", mint0, mint1)
+
+	// set current realm and origin caller
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/gnoswap/router"))
+	// SWAP 1 -> 0
+	swap0, swap1 := pool.Swap(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee100,
+		adminAddr,
+		false,
+		"60183363",
+		MAX_PRICE,
+		func(cur realm, amount0Delta, amount1Delta int64, _ *pool.CallbackMarker) error {
+			return mockSwapCallback(cur, barPath, fooPath, amount0Delta, amount1Delta)
+		},
+	)
+
+	println("[INFO] Swapped:", swap0, swap1)
+
+	// BURN
+	testing.SetRealm(posRealm)
+	burn0, burn1 := pool.Burn(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee100,
+		0,
+		120,
+		test_liquidityExpectStr,
+		adminAddr,
+	)
+
+	println("[INFO] Burned:", burn0, burn1)
+
+	// COLLECT
+	testing.SetRealm(posRealm)
+	collect0, collect1 := pool.Collect(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee100,
+		adminAddr,
+		0,
+		120,
+		MAX_INT64,
+		MAX_INT64,
+	)
+
+	println("[INFO] Collected:", collect0, collect1)
+
+	thisPool, _ = pool.GetPool(barPath, fooPath, fee100)
+	slotTick := thisPool.Slot0Tick()
+	println("[EXPECTED] Pool tick:", slotTick, "expected: >= 120")
+	uassert.True(t, slotTick >= 120, ufmt.Sprintf("tick(%d) should be >= 120", slotTick)) // temporary fix (cc @jinoosss)
+	println()
+	println("[INFO] Scenario completed")
+}
+
+func mockSwapCallback(cur realm, token0Path string, token1Path string, amount0Delta int64, amount1Delta int64) error {
+	testing.SetRealm(adminRealm)
+
+	if amount0Delta > 0 {
+		common.SafeGRC20Transfer(cross(cur), token0Path, poolAddr, amount0Delta)
+	}
+	if amount1Delta > 0 {
+		common.SafeGRC20Transfer(cross(cur), token1Path, poolAddr, amount1Delta)
+	}
+
+	return nil
+}
+
+// Output:
+// [SCENARIO] Limit Order Thru Positive 1 With Fee
+// [INFO] Starting scenario: Limit order thru positive 1 with fee
+// [INFO] Setting up pool with specific tick
+// [INFO] Approving pool creation fee
+//
+// [SCENARIO] 1. Minting position spanning current tick
+// [INFO] Minted position: 59817378 0
+// [INFO] Swapped: -59817377 60183363
+// [INFO] Burned: 0 60177342
+// [INFO] Collected: 0 60181856
+// [EXPECTED] Pool tick: 120 expected: >= 120
+//
+// [INFO] Scenario completed

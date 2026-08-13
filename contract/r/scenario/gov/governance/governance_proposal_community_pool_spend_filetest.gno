@@ -1,0 +1,161 @@
+// governance proposal community pool spend
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"chain/runtime"
+	"testing"
+	"time"
+
+	"gno.land/r/gnoswap/scenarioutils"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/protocol_fee"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/emission"
+
+	"gno.land/r/gnoswap/gov/governance"
+	_ "gno.land/r/gnoswap/gov/governance/v1"
+
+	gs "gno.land/r/gnoswap/gov/staker"
+	_ "gno.land/r/gnoswap/gov/staker/v1"
+
+	"gno.land/r/gnoswap/gns"
+)
+
+var t *testing.T
+
+var (
+	to               = testutils.TestAddress("to")
+	tokenPath        = "gno.land/r/gnoswap/gns.GNS"
+	adminAddr        = access.MustGetAddress(prbac.ROLE_ADMIN.String())
+	govStakerAddr    = access.MustGetAddress(prbac.ROLE_GOV_STAKER.String())
+	proposalID       = int64(1)
+	currentBlockTime = int64(2)
+)
+
+func main(cur realm) {
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+	config := governance.GetLatestConfig()
+	println("[SCENARIO] 1. Delegate gns to admin")
+	delegateGnsToAdmin(cur)
+	println()
+
+	println("[SCENARIO] 2. Skip vote weight smoothing duration for create proposal")
+	testing.SkipHeights(int64(config.VotingWeightSmoothingDuration) / currentBlockTime)
+	println("[INFO] current height:", runtime.ChainHeight())
+	println()
+
+	println("[SCENARIO] 3. Propose Community Pool Spend")
+	proposeCommunityPoolSpend(cur)
+	println()
+
+	println("[SCENARIO] 4. Skip voting start delay for ready to vote")
+	testing.SkipHeights(int64(config.VotingStartDelay) / currentBlockTime)
+	println("[INFO] current height:", runtime.ChainHeight())
+	println()
+
+	// Vote for the proposal
+	println("[SCENARIO] 4. Vote for the proposal")
+	vote(cur, proposalID, true)
+	println()
+
+	println("[SCENARIO] 5. Skip voting period and execution delay for ready to execute")
+	testing.SkipHeights(int64(config.VotingPeriod) / currentBlockTime)
+	testing.SkipHeights(int64(config.ExecutionDelay) / currentBlockTime)
+	println("[INFO] current height:", runtime.ChainHeight())
+	println()
+
+	println("[SCENARIO] 6. Execute Proposal")
+	execute(cur, proposalID)
+	println()
+}
+
+func delegateGnsToAdmin(cur realm) {
+	delegatedAmount := int64(1_000_000_000)
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+
+	scenarioutils.EnsureCanonicalDefaultPool(cross(cur))
+	emission.SetDistributionStartTime(cross(cur), time.Now().Unix()+1)
+
+	gns.Approve(cross(cur), govStakerAddr, delegatedAmount)
+	gs.Delegate(cross(cur), adminAddr, int64(delegatedAmount), "")
+
+	ufmt.Printf("[INFO] gns delegated to %s (amount: %d)\n", adminAddr.String(), delegatedAmount)
+}
+
+func proposeCommunityPoolSpend(cur realm) {
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+
+	proposalID := governance.ProposeCommunityPoolSpend(cross(cur), "test_title", "test_description", to, tokenPath, 100)
+	println("[INFO] created proposal ID:", proposalID)
+}
+
+func vote(cur realm, proposalID int64, yea bool) {
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+
+	prevYeaNum, _ := governance.GetYeaByProposalId(proposalID)
+	prevNayNum, _ := governance.GetNayByProposalId(proposalID)
+
+	governance.Vote(cross(cur), proposalID, yea)
+
+	afterYeaNum, _ := governance.GetYeaByProposalId(proposalID)
+	afterNayNum, _ := governance.GetNayByProposalId(proposalID)
+	ufmt.Printf("[INFO] before voting - yea: %d, nay: %d\n", prevYeaNum, prevNayNum)
+	ufmt.Printf("[INFO] after voting - yea: %d, nay: %d\n", afterYeaNum, afterNayNum)
+}
+
+func execute(cur realm, proposalID int64) {
+	testing.SetRealm(testing.NewUserRealm(adminAddr))
+
+	// get receiver's balance before executing
+	prevReceiverBalance := gns.BalanceOf(to)
+	ufmt.Printf("[INFO] receiver's balance before executing: %d\n", prevReceiverBalance)
+
+	// execute proposal
+	governance.Execute(cross(cur), proposalID)
+
+	// get receiver's balance after executing
+	afterReceiverBalance := gns.BalanceOf(to)
+	ufmt.Printf("[INFO] receiver's balance after executing: %d\n", afterReceiverBalance)
+
+	proposalState, _ := governance.GetProposalStatusByProposalId(proposalID)
+
+	ufmt.Printf("[EXPECTED] receiver's balance increased by %d\n", afterReceiverBalance-prevReceiverBalance)
+	ufmt.Printf("[EXPECTED] proposal's executed state is %v\n", proposalState)
+}
+
+// Output:
+// [SCENARIO] 1. Delegate gns to admin
+// [INFO] gns delegated to g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5 (amount: 1000000000)
+//
+// [SCENARIO] 2. Skip vote weight smoothing duration for create proposal
+// [INFO] current height: 43323
+//
+// [SCENARIO] 3. Propose Community Pool Spend
+// [INFO] created proposal ID: 1
+//
+// [SCENARIO] 4. Skip voting start delay for ready to vote
+// [INFO] current height: 86523
+//
+// [SCENARIO] 4. Vote for the proposal
+// [INFO] before voting - yea: 0, nay: 0
+// [INFO] after voting - yea: 1000000000, nay: 0
+//
+// [SCENARIO] 5. Skip voting period and execution delay for ready to execute
+// [INFO] current height: 432123
+//
+// [SCENARIO] 6. Execute Proposal
+// [INFO] receiver's balance before executing: 0
+// [INFO] receiver's balance after executing: 100
+// [EXPECTED] receiver's balance increased by 100
+// [EXPECTED] proposal's executed state is executed

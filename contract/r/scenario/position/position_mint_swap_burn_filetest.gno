@@ -1,0 +1,298 @@
+// position mint swap burn
+
+// PKGPATH: gno.land/r/demo/main
+
+package main
+
+import (
+	"testing"
+	"time"
+
+	"gno.land/p/gnoswap/gnsmath"
+
+	testutils "gno.land/p/nt/testutils/v0"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/common"
+
+	"gno.land/r/gnoswap/pool"
+	"gno.land/r/gnoswap/position"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/foo"
+)
+
+const (
+	INT64_MAX int64 = 9223372036854775807
+
+	MIN_PRICE string = "4295128740"                                        // MIN_SQRT_RATIO + 1
+	MAX_PRICE string = "1461446703485210103287273052203988822378723970341" // MAX_SQRT_RATIO - 1
+)
+
+var (
+	adminAddr, _       = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm         = testing.NewUserRealm(adminAddr)
+	poolAddr, _        = access.GetAddress(prbac.ROLE_POOL.String())
+	routerAddr, _      = access.GetAddress(prbac.ROLE_ROUTER.String())
+	protocolFeeAddr, _ = access.GetAddress(prbac.ROLE_PROTOCOL_FEE.String())
+	routerRealm        = testing.NewUserRealm(routerAddr)
+
+	aliceAddr  = testutils.TestAddress("alice")
+	aliceRealm = testing.NewUserRealm(aliceAddr)
+
+	barPath        = "gno.land/r/onbloc/bar.BAR"
+	fooPath        = "gno.land/r/onbloc/foo.FOO"
+	fee500  uint32 = 500
+)
+
+func main(cur realm) {
+	ufmt.Println("[SCENARIO] 1. Initialize pool")
+	initPool(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 2. Mint initial position")
+	mintPosition(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 3. Check initial state")
+	checkInitialState(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 4. Execute swaps")
+	executeSwaps(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 5. Collect fees")
+	collectFees(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 6. Burn position")
+	burnPosition(cur)
+	println()
+
+	ufmt.Println("[SCENARIO] 7. Verify final state")
+	verifyFinalState(cur)
+	println()
+}
+
+func initPool(cur realm) {
+	testing.SetRealm(adminRealm)
+	pool.SetPoolCreationFee(cross(cur), 0)
+
+	testing.SetRealm(adminRealm)
+
+	defaultTokenAmount := int64(100000000)
+
+	ufmt.Println("[INFO] Distributing Bar tokens")
+	bar.Transfer(cross(cur), aliceAddr, defaultTokenAmount)
+
+	ufmt.Println("[INFO] Distributing Foo tokens")
+	foo.Transfer(cross(cur), aliceAddr, defaultTokenAmount)
+
+	bar.Approve(cross(cur), poolAddr, INT64_MAX)
+	foo.Approve(cross(cur), poolAddr, INT64_MAX)
+
+	ufmt.Printf("[INFO] Initial Bar balance of Alice: %d\n", bar.BalanceOf(aliceAddr))
+	ufmt.Printf("[INFO] Initial Foo balance of Alice: %d\n", foo.BalanceOf(aliceAddr))
+
+	ufmt.Println("[INFO] Creating pool")
+	pool.CreatePool(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		gnsmath.TickMathGetSqrtRatioAtTick(0).ToString(),
+	)
+}
+
+func mintPosition(cur realm) {
+	testing.SetRealm(aliceRealm)
+	bar.Approve(cross(cur), poolAddr, INT64_MAX)
+	foo.Approve(cross(cur), poolAddr, INT64_MAX)
+
+	ufmt.Println("[INFO] Minting position")
+	positionId, liquidity, amount0, amount1 := position.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		-1000,
+		1000,
+		"50000000",
+		"50000000",
+		"0",
+		"0",
+		time.Now().Unix()+3600,
+		aliceAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] Position ID should be %d\n", positionId)
+	ufmt.Printf("[EXPECTED] Liquidity should be %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] Amount0 should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Amount1 should be %s\n", amount1)
+}
+
+func checkInitialState(cur realm) {
+	testing.SetRealm(adminRealm)
+	pos, _ := position.GetPosition(1)
+
+	ufmt.Printf("[EXPECTED] Initial liquidity should be %s\n", pos.Liquidity())
+	ufmt.Printf("[EXPECTED] Initial token0 balance should be %d\n", position.GetPositionToken0Balance(1))
+	ufmt.Printf("[EXPECTED] Initial token1 balance should be %d\n", position.GetPositionToken1Balance(1))
+}
+
+func executeSwaps(cur realm) {
+	testing.SetRealm(adminRealm)
+	bar.Approve(cross(cur), poolAddr, INT64_MAX)
+	foo.Approve(cross(cur), poolAddr, INT64_MAX)
+
+	// set current realm and origin caller
+	testing.SetRealm(testing.NewCodeRealm("gno.land/r/gnoswap/router"))
+	ufmt.Println("[INFO] Executing swap BAR -> FOO")
+	amount0, amount1 := pool.Swap(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		adminAddr,
+		true,
+		"10000000",
+		MIN_PRICE,
+		func(cur realm, amount0Delta, amount1Delta int64, _ *pool.CallbackMarker) error {
+			return mockSwapCallback(cur, barPath, fooPath, amount0Delta, amount1Delta, true)
+		},
+	)
+
+	ufmt.Printf("[EXPECTED] Swap1 amount0 should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Swap1 amount1 should be %s\n", amount1)
+
+	ufmt.Println("[INFO] Executing swap FOO -> BAR")
+	amount0, amount1 = pool.Swap(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		adminAddr,
+		false,
+		"10000000",
+		MAX_PRICE,
+		func(cur realm, amount0Delta, amount1Delta int64, _ *pool.CallbackMarker) error {
+			return mockSwapCallback(cur, barPath, fooPath, amount0Delta, amount1Delta, false)
+		},
+	)
+
+	ufmt.Printf("[EXPECTED] Swap2 amount0 should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Swap2 amount1 should be %s\n", amount1)
+}
+
+func collectFees(cur realm) {
+	testing.SetRealm(aliceRealm)
+	bar.Approve(cross(cur), poolAddr, INT64_MAX)
+	foo.Approve(cross(cur), poolAddr, INT64_MAX)
+
+	ufmt.Println("[INFO] Collecting fees")
+
+	_, fee0, fee1, _, _, _ := position.CollectFee(cross(cur), 1)
+
+	ufmt.Printf("[EXPECTED] Collected fee0 should be %s\n", fee0)
+	ufmt.Printf("[EXPECTED] Collected fee1 should be %s\n", fee1)
+}
+
+func burnPosition(cur realm) {
+	testing.SetRealm(aliceRealm)
+	bar.Approve(cross(cur), poolAddr, INT64_MAX)
+	foo.Approve(cross(cur), poolAddr, INT64_MAX)
+
+	ufmt.Println("[INFO] Decreasing all liquidity")
+	_, liquidity, _, _, amount0, amount1, _ := position.DecreaseLiquidity(
+		cross(cur),
+		1,
+		"1025258313",
+		"0",
+		"0",
+		time.Now().Unix()+3600,
+	)
+
+	ufmt.Printf("[EXPECTED] Removed liquidity should be %s\n", liquidity)
+	ufmt.Printf("[EXPECTED] Amount0 removed should be %s\n", amount0)
+	ufmt.Printf("[EXPECTED] Amount1 removed should be %s\n", amount1)
+}
+
+func verifyFinalState(cur realm) {
+	testing.SetRealm(adminRealm)
+	pos, _ := position.GetPosition(1)
+
+	ufmt.Printf("[EXPECTED] Position should be burned\n")
+	ufmt.Printf("[EXPECTED] Final liquidity should be %s\n", pos.Liquidity())
+	ufmt.Printf("[EXPECTED] Final token0 balance should be %d\n", position.GetPositionToken0Balance(1))
+	ufmt.Printf("[EXPECTED] Final token1 balance should be %d\n", position.GetPositionToken1Balance(1))
+}
+
+func mockSwapCallback(cur realm, token0Path string, token1Path string, amount0Delta int64, amount1Delta int64, zeroForOne bool) error {
+	testing.SetRealm(adminRealm)
+
+	if amount0Delta > 0 {
+		common.SafeGRC20Transfer(cross(cur), token0Path, poolAddr, amount0Delta)
+	}
+
+	if amount1Delta > 0 {
+		common.SafeGRC20Transfer(cross(cur), token1Path, poolAddr, amount1Delta)
+	}
+
+	return nil
+}
+
+// Output:
+// [SCENARIO] 1. Initialize pool
+// [INFO] Distributing Bar tokens
+// [INFO] Distributing Foo tokens
+// [INFO] Initial Bar balance of Alice: 100000000
+// [INFO] Initial Foo balance of Alice: 100000000
+// [INFO] Creating pool
+//
+// [SCENARIO] 2. Mint initial position
+// [INFO] Minting position
+// [EXPECTED] Position ID should be 1
+// [EXPECTED] Liquidity should be 1025258313
+// [EXPECTED] Amount0 should be 50000000
+// [EXPECTED] Amount1 should be 50000000
+//
+// [SCENARIO] 3. Check initial state
+// [EXPECTED] Initial liquidity should be 1025258313
+// [EXPECTED] Initial token0 balance should be 49999999
+// [EXPECTED] Initial token1 balance should be 49999999
+//
+// [SCENARIO] 4. Execute swaps
+// [INFO] Executing swap BAR -> FOO
+// [EXPECTED] Swap1 amount0 should be 10000000
+// [EXPECTED] Swap1 amount1 should be -9898501
+// [INFO] Executing swap FOO -> BAR
+// [EXPECTED] Swap2 amount0 should be -10091487
+// [EXPECTED] Swap2 amount1 should be 10000000
+//
+// [SCENARIO] 5. Collect fees
+// [INFO] Collecting fees
+// [EXPECTED] Collected fee0 should be 4950
+// [EXPECTED] Collected fee1 should be 4950
+//
+// [SCENARIO] 6. Burn position
+// [INFO] Decreasing all liquidity
+// [EXPECTED] Removed liquidity should be 1025258313
+// [EXPECTED] Amount0 removed should be 49903512
+// [EXPECTED] Amount1 removed should be 50096496
+//
+// [SCENARIO] 7. Verify final state
+// [EXPECTED] Position should be burned
+// [EXPECTED] Final liquidity should be 0
+// [EXPECTED] Final token0 balance should be 0
+// [EXPECTED] Final token1 balance should be 0

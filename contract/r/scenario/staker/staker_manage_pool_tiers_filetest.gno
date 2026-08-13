@@ -1,0 +1,207 @@
+// staker manage pool tiers scenario test
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"gno.land/p/gnoswap/gnsmath"
+	"testing"
+
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+
+	"gno.land/r/gnoswap/access"
+
+	"gno.land/r/gnoswap/gns"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	pl "gno.land/r/gnoswap/pool"
+	sr "gno.land/r/gnoswap/staker"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminUser    = adminAddr
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	stakerAddr, _ = access.GetAddress(prabc.ROLE_STAKER.String())
+	stakerUser    = stakerAddr
+	stakerRealm   = testing.NewCodeRealm("gno.land/r/gnoswap/staker")
+
+	poolAddr, _ = access.GetAddress(prabc.ROLE_POOL.String())
+
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	fooPath = "gno.land/r/onbloc/foo.FOO"
+
+	fee100 uint32 = 100
+	fee500 uint32 = 500
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Initialize account and emission")
+	initAccountAndEmission(cur)
+	println()
+
+	println("[SCENARIO] 2. Create pools")
+	createPools(cur)
+	println()
+
+	println("[SCENARIO] 3. Set pool tier by admin")
+	setPoolTierByAdmin(cur)
+	println()
+
+	println("[SCENARIO] 4. Change pool tier by admin")
+	changePoolTierByAdmin(cur)
+	println()
+
+	println("[SCENARIO] 5. Set another pool to tier 3")
+	setAnotherPoolTier3(cur)
+	println()
+
+	println("[SCENARIO] 6. Remove pool tier by admin")
+	removePoolTierByAdmin(cur)
+}
+
+func initAccountAndEmission(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] set unstaking fee to 0")
+	sr.SetUnStakingFee(cross(cur), 0)
+
+	println("[INFO] set pool creation fee to 0")
+	pl.SetPoolCreationFee(cross(cur), 0)
+
+	println("[INFO] register gns change callback")
+	testing.SetRealm(stakerRealm)
+}
+
+func createPools(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve gns for pool creation")
+	gns.Approve(cross(cur), poolAddr, pl.GetPoolCreationFee()*2)
+	testing.SkipHeights(1)
+
+	println("[INFO] create bar:foo:500 pool")
+	pl.CreatePool(cross(cur), barPath, fooPath, 500, gnsmath.TickMathGetSqrtRatioAtTick(-10000).ToString())
+
+	println("[INFO] create bar:foo:100 pool")
+	pl.CreatePool(cross(cur), barPath, fooPath, 100, gnsmath.TickMathGetSqrtRatioAtTick(-10000).ToString())
+
+	testing.SkipHeights(1)
+}
+
+func setPoolTierByAdmin(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	poolPath := "gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/foo.FOO:500"
+	targetTier := uint64(2)
+
+	println("[INFO] set pool tier to 2")
+	sr.SetPoolTier(cross(cur), poolPath, targetTier)
+
+	// Verify the tier was set correctly
+	currentTier := sr.GetPoolTier(poolPath)
+	ufmt.Printf("[EXPECTED] pool tier set to: %d\n", currentTier)
+
+	if currentTier != targetTier {
+		panic("pool tier not set correctly")
+	}
+}
+
+func changePoolTierByAdmin(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	poolPath := "gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/foo.FOO:500"
+	newTier := uint64(3)
+
+	println("[INFO] change pool tier from 2 to 3")
+	sr.SetPoolTier(cross(cur), poolPath, newTier)
+
+	// Verify the tier was changed correctly
+	currentTier := sr.GetPoolTier(poolPath)
+	ufmt.Printf("[EXPECTED] pool tier changed to: %d\n", currentTier)
+
+	if currentTier != newTier {
+		panic("pool tier not changed correctly")
+	}
+}
+
+func setAnotherPoolTier3(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	poolPath := "gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/foo.FOO:100"
+	targetTier := uint64(3)
+
+	println("[INFO] set another pool (bar:foo:100) to tier 3")
+	sr.SetPoolTier(cross(cur), poolPath, targetTier)
+
+	// Verify the tier was set correctly
+	currentTier := sr.GetPoolTier(poolPath)
+	ufmt.Printf("[EXPECTED] second pool tier set to: %d\n", currentTier)
+
+	if currentTier != targetTier {
+		panic("second pool tier not set correctly")
+	}
+}
+
+func removePoolTierByAdmin(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	poolPath := "gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/foo.FOO:500"
+
+	println("[INFO] remove pool tier (set to 0)")
+	sr.RemovePoolTier(cross(cur), poolPath)
+
+	// Verify the tier was removed (should be 0)
+	currentTier := sr.GetPoolTier(poolPath)
+	ufmt.Printf("[EXPECTED] pool tier removed (should be 0): %d\n", currentTier)
+
+	if currentTier != 0 {
+		panic("pool tier not removed correctly")
+	}
+
+	// Verify the other pool still has its tier
+	otherPoolPath := "gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/foo.FOO:100"
+	otherTier := sr.GetPoolTier(otherPoolPath)
+	ufmt.Printf("[EXPECTED] other pool tier unchanged: %d\n", otherTier)
+
+	if otherTier != 3 {
+		panic("other pool tier was affected unexpectedly")
+	}
+}
+
+// Output:
+// [SCENARIO] 1. Initialize account and emission
+// [INFO] set unstaking fee to 0
+// [INFO] set pool creation fee to 0
+// [INFO] register gns change callback
+//
+// [SCENARIO] 2. Create pools
+// [INFO] approve gns for pool creation
+// [INFO] create bar:foo:500 pool
+// [INFO] create bar:foo:100 pool
+//
+// [SCENARIO] 3. Set pool tier by admin
+// [INFO] set pool tier to 2
+// [EXPECTED] pool tier set to: 2
+//
+// [SCENARIO] 4. Change pool tier by admin
+// [INFO] change pool tier from 2 to 3
+// [EXPECTED] pool tier changed to: 3
+//
+// [SCENARIO] 5. Set another pool to tier 3
+// [INFO] set another pool (bar:foo:100) to tier 3
+// [EXPECTED] second pool tier set to: 3
+//
+// [SCENARIO] 6. Remove pool tier by admin
+// [INFO] remove pool tier (set to 0)
+// [EXPECTED] pool tier removed (should be 0): 0
+// [EXPECTED] other pool tier unchanged: 3

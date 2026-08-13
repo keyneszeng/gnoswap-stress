@@ -1,0 +1,450 @@
+// single position for each warm-up tier (total 4 positions) - internal only scenario test
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"strconv"
+	"testing"
+	"time"
+
+	"gno.land/p/gnoswap/gnsmath"
+	"gno.land/r/gnoswap/scenarioutils"
+
+	"gno.land/p/demo/tokens/grc721"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/r/gnoswap/access"
+
+	"gno.land/r/gnoswap/emission"
+	"gno.land/r/gnoswap/gnft"
+	"gno.land/r/gnoswap/gns"
+
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	sr "gno.land/r/gnoswap/staker"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/baz"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminUser    = adminAddr
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	stakerAddr, _ = access.GetAddress(prabc.ROLE_STAKER.String())
+	stakerUser    = stakerAddr
+	stakerRealm   = testing.NewCodeRealm("gno.land/r/gnoswap/staker")
+
+	poolAddr, _          = access.GetAddress(prabc.ROLE_POOL.String())
+	communityPoolAddr, _ = access.GetAddress(prabc.ROLE_COMMUNITY_POOL.String())
+
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	bazPath = "gno.land/r/onbloc/baz.BAZ"
+
+	fee100 uint32 = 100
+
+	maxTimeout int64 = 9999999999
+	maxInt64   int64 = 9223372036854775807
+
+	poolPath = "gno.land/r/onbloc/bar.BAR:gno.land/r/onbloc/baz.BAZ:100"
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Initialize and setup single pool for internal emission")
+	initAndSetupSinglePool(cur)
+	println()
+
+	println("[SCENARIO] 2. Create bar:baz:100 pool")
+	createPool(cur)
+	println()
+
+	println("[SCENARIO] 3. Mint 4 positions")
+	mintPositions(cur)
+	println()
+
+	println("[SCENARIO] 4. Stake position 01 and test warm-up progression")
+	stakeTokenPos01AndTestWarmUp(cur)
+	println()
+
+	println("[SCENARIO] 5. Stake positions 02-04")
+	stakeTokensPos02To04(cur)
+	println()
+
+	println("[SCENARIO] 6. Collect rewards for all positions")
+	collectRewardsAll(cur)
+	println()
+
+	println("[SCENARIO] 7. Test single block reward distribution")
+	testSingleBlockRewardDistribution(cur)
+}
+
+func initAndSetupSinglePool(cur realm) {
+	testing.SetRealm(adminRealm)
+	scenarioutils.EnsureCanonicalDefaultPool(cross(cur))
+	emission.SetDistributionStartTime(cross(cur), time.Now().Unix()+1)
+
+	println("[INFO] set unstaking fee to 0")
+	sr.SetUnStakingFee(cross(cur), 0)
+
+	println("[INFO] set pool creation fee to 0")
+	pl.SetPoolCreationFee(cross(cur), 0)
+
+	println("[INFO] set community pool distribution to 0%")
+	emission.ChangeDistributionPct(
+		cross(cur),
+		7500, // liquidityStakerPct
+		2500, // devOpsPct
+		0,    // communityPoolPct
+		0,    // govStakerPct
+	)
+
+	println("[INFO] register gns change callback")
+	testing.SetRealm(stakerRealm)
+}
+
+func createPool(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] create bar:baz:100 pool")
+	pl.CreatePool(cross(cur), barPath, bazPath, 100, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString())
+
+	println("[INFO] set pool to tier 1")
+	sr.SetPoolTier(cross(cur), poolPath, 1)
+
+	testing.SkipHeights(1)
+}
+
+func mintPositions(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	bar.Approve(cross(cur), poolAddr, maxInt64)
+	baz.Approve(cross(cur), poolAddr, maxInt64)
+
+	println("[INFO] mint position 01 (tick range: -30 ~ 30)")
+	positionId1, liquidity1, amount0_1, amount1_1 := pn.Mint(
+		cross(cur),
+		barPath,
+		bazPath,
+		fee100,
+		int32(-30),
+		int32(30),
+		"50",
+		"50",
+		"1",
+		"1",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position 01 - ID: %d, liquidity: %s\n", positionId1, liquidity1)
+	ufmt.Printf("[EXPECTED] amounts - 0: %s, 1: %s\n", amount0_1, amount1_1)
+	testing.SkipHeights(1)
+
+	println("[INFO] mint position 02 (tick range: -30 ~ 30)")
+	positionId2, liquidity2, _, _ := pn.Mint(
+		cross(cur),
+		barPath,
+		bazPath,
+		fee100,
+		int32(-30),
+		int32(30),
+		"50",
+		"50",
+		"1",
+		"1",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position 02 - ID: %d, liquidity: %s\n", positionId2, liquidity2)
+	testing.SkipHeights(1)
+
+	println("[INFO] mint position 03 (tick range: -30 ~ 30)")
+	positionId3, liquidity3, _, _ := pn.Mint(
+		cross(cur),
+		barPath,
+		bazPath,
+		fee100,
+		int32(-30),
+		int32(30),
+		"50",
+		"50",
+		"1",
+		"1",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position 03 - ID: %d, liquidity: %s\n", positionId3, liquidity3)
+	testing.SkipHeights(1)
+
+	println("[INFO] mint position 04 (tick range: -30 ~ 30)")
+	positionId4, liquidity4, _, _ := pn.Mint(
+		cross(cur),
+		barPath,
+		bazPath,
+		fee100,
+		int32(-30),
+		int32(30),
+		"50",
+		"50",
+		"1",
+		"1",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position 04 - ID: %d, liquidity: %s\n", positionId4, liquidity4)
+	testing.SkipHeights(1)
+}
+
+func stakeTokenPos01AndTestWarmUp(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] stake position 01")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, 1))
+	sr.StakeToken(cross(cur), 1, "")
+	testing.SkipHeights(1)
+
+	println("[INFO] collect reward for 30% warm-up")
+	userOldGns := gns.BalanceOf(adminUser)
+	communityOldGns := gns.BalanceOf(communityPoolAddr)
+
+	sr.CollectReward(cross(cur), 1)
+
+	userNewGns := gns.BalanceOf(adminUser)
+	communityNewGns := gns.BalanceOf(communityPoolAddr)
+
+	userReward := userNewGns - userOldGns
+	communityReward := communityNewGns - communityOldGns
+
+	ufmt.Printf("[EXPECTED] user reward (30%% warm-up): %d\n", userReward)
+	ufmt.Printf("[EXPECTED] community pool reward (unclaimable + penalty): %d\n", communityReward)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] progress to 50% warm-up")
+	testing.SkipHeights(216001)
+	sr.CollectReward(cross(cur), 1)
+
+	testing.SkipHeights(1)
+	userOldGns = gns.BalanceOf(adminUser)
+	communityOldGns = gns.BalanceOf(communityPoolAddr)
+
+	sr.CollectReward(cross(cur), 1)
+
+	userNewGns = gns.BalanceOf(adminUser)
+	communityNewGns = gns.BalanceOf(communityPoolAddr)
+
+	userReward = userNewGns - userOldGns
+	communityReward = communityNewGns - communityOldGns
+
+	ufmt.Printf("[EXPECTED] user reward (50%% warm-up): %d\n", userReward)
+	ufmt.Printf("[EXPECTED] community pool reward (50%% penalty): %d\n", communityReward)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] progress to 70% warm-up")
+	testing.SkipHeights(432001)
+	sr.CollectReward(cross(cur), 1)
+
+	testing.SkipHeights(1)
+	userOldGns = gns.BalanceOf(adminUser)
+	communityOldGns = gns.BalanceOf(communityPoolAddr)
+
+	sr.CollectReward(cross(cur), 1)
+
+	userNewGns = gns.BalanceOf(adminUser)
+	communityNewGns = gns.BalanceOf(communityPoolAddr)
+
+	userReward = userNewGns - userOldGns
+	communityReward = communityNewGns - communityOldGns
+
+	ufmt.Printf("[EXPECTED] user reward (70%% warm-up): %d\n", userReward)
+	ufmt.Printf("[EXPECTED] community pool reward (30%% penalty): %d\n", communityReward)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] progress to 100% warm-up")
+	testing.SkipHeights(1728000)
+	sr.CollectReward(cross(cur), 1)
+
+	testing.SkipHeights(1)
+	userOldGns = gns.BalanceOf(adminUser)
+	communityOldGns = gns.BalanceOf(communityPoolAddr)
+
+	sr.CollectReward(cross(cur), 1)
+
+	userNewGns = gns.BalanceOf(adminUser)
+	communityNewGns = gns.BalanceOf(communityPoolAddr)
+
+	userReward = userNewGns - userOldGns
+	communityReward = communityNewGns - communityOldGns
+
+	ufmt.Printf("[EXPECTED] user reward (100%% warm-up): %d\n", userReward)
+	ufmt.Printf("[EXPECTED] community pool reward (no penalty): %d\n", communityReward)
+
+	testing.SkipHeights(1)
+}
+
+func stakeTokensPos02To04(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] stake position 02")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, 2))
+	sr.StakeToken(cross(cur), 2, "")
+
+	println("[INFO] stake position 03")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, 3))
+	sr.StakeToken(cross(cur), 3, "")
+	testing.SkipHeights(1)
+
+	println("[INFO] stake position 04")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, 4))
+	sr.StakeToken(cross(cur), 4, "")
+	testing.SkipHeights(1)
+}
+
+func collectRewardsAll(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] collect rewards for all positions")
+	sr.CollectReward(cross(cur), 1)
+	sr.CollectReward(cross(cur), 2)
+	sr.CollectReward(cross(cur), 3)
+	sr.CollectReward(cross(cur), 4)
+}
+
+func testSingleBlockRewardDistribution(cur realm) {
+	testing.SkipHeights(1)
+
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] test reward distribution for single block")
+
+	// Position 01 (100% warm-up)
+	beforeGns := gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 1)
+	afterGns := gns.BalanceOf(adminUser)
+	pos01Reward := afterGns - beforeGns
+
+	ufmt.Printf("[EXPECTED] position 01 reward (100%% warm-up, 25%% share): %d\n", pos01Reward)
+
+	// Position 02 (30% warm-up)
+	beforeGns = gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 2)
+	afterGns = gns.BalanceOf(adminUser)
+	pos02Reward := afterGns - beforeGns
+
+	ufmt.Printf("[EXPECTED] position 02 reward (30%% warm-up, 25%% share): %d\n", pos02Reward)
+
+	// Position 03 (30% warm-up)
+	beforeGns = gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 3)
+	afterGns = gns.BalanceOf(adminUser)
+	pos03Reward := afterGns - beforeGns
+
+	ufmt.Printf("[EXPECTED] position 03 reward (30%% warm-up, 25%% share): %d\n", pos03Reward)
+
+	// Position 04 (30% warm-up)
+	beforeGns = gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 4)
+	afterGns = gns.BalanceOf(adminUser)
+	pos04Reward := afterGns - beforeGns
+
+	ufmt.Printf("[EXPECTED] position 04 reward (30%% warm-up, 25%% share): %d\n", pos04Reward)
+
+	// Verify distribution: each position gets 25% of emission reward
+	// 1 block emission reward for staker = 10702054
+	// Each position receives 10702054 * 25% = 2675513.5
+	totalEmissionPerBlock := uint64(10702054)
+	expectedPerPosition := totalEmissionPerBlock / 4
+
+	ufmt.Printf("[INFO] expected reward per position (25%% share): %d\n", expectedPerPosition)
+}
+
+func positionIdFrom(cur realm, positionId any) grc721.TokenID {
+	if positionId == nil {
+		panic("positionId is nil")
+	}
+
+	switch positionId.(type) {
+	case string:
+		return grc721.TokenID(positionId.(string))
+	case int:
+		return grc721.TokenID(strconv.Itoa(positionId.(int)))
+	case uint64:
+		return grc721.TokenID(strconv.Itoa(int(positionId.(uint64))))
+	case grc721.TokenID:
+		return positionId.(grc721.TokenID)
+	default:
+		panic("unsupported positionId type")
+	}
+}
+
+// Output:
+// [SCENARIO] 1. Initialize and setup single pool for internal emission
+// [INFO] set unstaking fee to 0
+// [INFO] set pool creation fee to 0
+// [INFO] set community pool distribution to 0%
+// [INFO] register gns change callback
+//
+// [SCENARIO] 2. Create bar:baz:100 pool
+// [INFO] create bar:baz:100 pool
+// [INFO] set pool to tier 1
+//
+// [SCENARIO] 3. Mint 4 positions
+// [INFO] mint position 01 (tick range: -30 ~ 30)
+// [EXPECTED] position 01 - ID: 1, liquidity: 33360
+// [EXPECTED] amounts - 0: 50, 1: 50
+// [INFO] mint position 02 (tick range: -30 ~ 30)
+// [EXPECTED] position 02 - ID: 2, liquidity: 33360
+// [INFO] mint position 03 (tick range: -30 ~ 30)
+// [EXPECTED] position 03 - ID: 3, liquidity: 33360
+// [INFO] mint position 04 (tick range: -30 ~ 30)
+// [EXPECTED] position 04 - ID: 4, liquidity: 33360
+//
+// [SCENARIO] 4. Stake position 01 and test warm-up progression
+// [INFO] stake position 01
+// [INFO] collect reward for 30% warm-up
+// [EXPECTED] user reward (30% warm-up): 4013269
+// [EXPECTED] community pool reward (unclaimable + penalty): 73576607
+// [INFO] progress to 50% warm-up
+// [EXPECTED] user reward (50% warm-up): 6688782
+// [EXPECTED] community pool reward (50% penalty): 6688783
+// [INFO] progress to 70% warm-up
+// [EXPECTED] user reward (70% warm-up): 9364294
+// [EXPECTED] community pool reward (30% penalty): 4013270
+// [INFO] progress to 100% warm-up
+// [EXPECTED] user reward (100% warm-up): 13377564
+// [EXPECTED] community pool reward (no penalty): 0
+//
+// [SCENARIO] 5. Stake positions 02-04
+// [INFO] stake position 02
+// [INFO] stake position 03
+// [INFO] stake position 04
+//
+// [SCENARIO] 6. Collect rewards for all positions
+// [INFO] collect rewards for all positions
+//
+// [SCENARIO] 7. Test single block reward distribution
+// [INFO] test reward distribution for single block
+// [EXPECTED] position 01 reward (100% warm-up, 25% share): 3344391
+// [EXPECTED] position 02 reward (30% warm-up, 25% share): 1003317
+// [EXPECTED] position 03 reward (30% warm-up, 25% share): 1003317
+// [EXPECTED] position 04 reward (30% warm-up, 25% share): 1003317
+// [INFO] expected reward per position (25% share): 2675513

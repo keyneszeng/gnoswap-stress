@@ -1,0 +1,166 @@
+// PKGPATH: gno.land/r/demo/main
+
+package main
+
+import (
+	"gno.land/p/gnoswap/gnsmath"
+	"testing"
+
+	uassert "gno.land/p/nt/uassert/v0"
+
+	"gno.land/r/onbloc/bar"
+	"gno.land/r/onbloc/foo"
+
+	prbac "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/protocol_fee/v1"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/pool"
+
+	"gno.land/r/gnoswap/gns"
+)
+
+var t = &testing.T{}
+
+// Constants for fee tiers
+const (
+	fee500 uint32 = 500
+)
+
+// Constants for addresses and approvals
+const (
+	maxApprove int64 = 9223372036854775806
+)
+
+// Variables for test addresses and realms
+var (
+	adminAddr, _    = access.GetAddress(prbac.ROLE_ADMIN.String())
+	adminRealm      = testing.NewUserRealm(adminAddr)
+	positionAddr, _ = access.GetAddress(prbac.ROLE_POSITION.String())
+	posRealm        = testing.NewUserRealm(positionAddr)
+	poolAddr, _     = access.GetAddress(prbac.ROLE_POOL.String())
+)
+
+// Token paths
+var (
+	fooPath = "gno.land/r/onbloc/foo.FOO"
+	barPath = "gno.land/r/onbloc/bar.BAR"
+	bazPath = "gno.land/r/onbloc/baz.BAZ"
+)
+
+// Test variables
+var (
+	test_tickLower  = int32(-6000)
+	test_tickUpper  = int32(6000)
+	poolCreationFee = int64(100_000_000)
+
+	test_liquidityExpectStr = "1000"
+)
+
+func main(cur realm) {
+	println("[SCENARIO] Mint Miscellaneous")
+	println("[INFO] Starting scenario: Mint miscellaneous")
+
+	testing.SetRealm(adminRealm)
+	gns.Approve(cross(cur), poolAddr, poolCreationFee)
+	pool.CreatePool(cross(cur), barPath, fooPath, fee500, gnsmath.TickMathGetSqrtRatioAtTick(0).ToString()) // tick
+
+	foo.Approve(cross(cur), poolAddr, maxApprove)
+	bar.Approve(cross(cur), poolAddr, maxApprove)
+
+	thisPool, _ := pool.GetPool(barPath, fooPath, fee500)
+
+	println("[SCENARIO] 1. returns 0 before initialization")
+	println("[EXPECTED] liquidity:", thisPool.Liquidity().ToString(), "expected: 0")
+	println()
+
+	println("[SCENARIO] 2. mint to right of the current price")
+	testing.SetRealm(posRealm)
+	liqBefore := thisPool.Liquidity().ToString()
+
+	amount0, amount1 := pool.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		1000,
+		2000,
+		test_liquidityExpectStr,
+		adminAddr,
+	)
+
+	liqAfter := thisPool.Liquidity().ToString()
+	println("[EXPECTED] liquidity:", liqAfter, "expected: ", liqBefore)
+	println("[EXPECTED] amount0:", amount0, "expected: 0")
+	println("[EXPECTED] amount1:", amount1, "expected: 0")
+	println()
+
+	println("[SCENARIO] 3. mint to left of the current price")
+	testing.SetRealm(posRealm)
+	liqBefore = thisPool.Liquidity().ToString()
+
+	amount0, amount1 = pool.Mint(
+		cross(cur),
+		barPath,
+		fooPath,
+		fee500,
+		-2000,
+		-1000,
+		test_liquidityExpectStr,
+		adminAddr,
+	)
+
+	liqAfter = thisPool.Liquidity().ToString()
+	println("[EXPECTED] liquidity:", liqAfter, "expected: ", liqBefore)
+	println("[EXPECTED] amount0:", amount0, "expected: 0")
+	println("[EXPECTED] amount1:", amount1, "expected: 0")
+	println()
+
+	println("[SCENARIO] 4. cannot remove more than the entire position")
+	testing.SetRealm(posRealm)
+	expectedPanic := `liquidity_math: underflow (x: 0, y: -1001, z:115792089237316195423570985008687907853269984665640564039457584007913129638935)`
+	uassert.AbortsWithMessage(
+		t,
+		cur,
+		expectedPanic,
+		func() {
+			pool.Burn(
+				cross(cur),
+				barPath,
+				fooPath,
+				fee500,
+				test_tickLower,
+				test_tickUpper,
+				"1001",
+				adminAddr,
+			)
+		},
+	)
+	println("[EXPECTED] panic: ", expectedPanic)
+	println()
+	println("[INFO] Scenario completed")
+}
+
+// Output:
+// [SCENARIO] Mint Miscellaneous
+// [INFO] Starting scenario: Mint miscellaneous
+// [SCENARIO] 1. returns 0 before initialization
+// [EXPECTED] liquidity: 0 expected: 0
+//
+// [SCENARIO] 2. mint to right of the current price
+// [EXPECTED] liquidity: 0 expected:  0
+// [EXPECTED] amount0: 47 expected: 0
+// [EXPECTED] amount1: 0 expected: 0
+//
+// [SCENARIO] 3. mint to left of the current price
+// [EXPECTED] liquidity: 0 expected:  0
+// [EXPECTED] amount0: 0 expected: 0
+// [EXPECTED] amount1: 47 expected: 0
+//
+// [SCENARIO] 4. cannot remove more than the entire position
+// [EXPECTED] panic:  liquidity_math: underflow (x: 0, y: -1001, z:115792089237316195423570985008687907853269984665640564039457584007913129638935)
+//
+// [INFO] Scenario completed

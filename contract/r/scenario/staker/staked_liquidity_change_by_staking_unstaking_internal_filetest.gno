@@ -1,0 +1,359 @@
+// staked liquidity change by staking and unstaking (internal rewards) scenario test
+
+// PKGPATH: gno.land/r/gnoswap/v1/main
+
+package main
+
+import (
+	"chain"
+	"chain/banker"
+	"strconv"
+	"testing"
+	"time"
+
+	"gno.land/p/gnoswap/gnsmath"
+	"gno.land/r/gnoswap/scenarioutils"
+
+	"gno.land/p/demo/tokens/grc721"
+	ufmt "gno.land/p/nt/ufmt/v0"
+
+	"gno.land/r/gnoland/wugnot"
+
+	"gno.land/r/gnoswap/access"
+	"gno.land/r/gnoswap/emission"
+	"gno.land/r/gnoswap/gnft"
+	"gno.land/r/gnoswap/gns"
+
+	prabc "gno.land/p/gnoswap/rbac"
+	_ "gno.land/r/gnoswap/rbac"
+
+	_ "gno.land/r/gnoswap/pool/v1"
+	_ "gno.land/r/gnoswap/position/v1"
+	_ "gno.land/r/gnoswap/staker/v1"
+
+	pl "gno.land/r/gnoswap/pool"
+	pn "gno.land/r/gnoswap/position"
+	sr "gno.land/r/gnoswap/staker"
+)
+
+var (
+	adminAddr, _ = access.GetAddress(prabc.ROLE_ADMIN.String())
+	adminUser    = adminAddr
+	adminRealm   = testing.NewUserRealm(adminAddr)
+
+	stakerAddr, _ = access.GetAddress(prabc.ROLE_STAKER.String())
+	stakerUser    = stakerAddr
+	stakerRealm   = testing.NewCodeRealm("gno.land/r/gnoswap/staker")
+
+	poolAddr, _ = access.GetAddress(prabc.ROLE_POOL.String())
+
+	wugnotAddr address = "g15vj5q08amlvyd0nx6zjgcvwq2d0gt9fcchrvum"
+
+	gnsPath    = "gno.land/r/gnoswap/gns.GNS"
+	wugnotPath = "gno.land/r/gnoland/wugnot.wugnot"
+
+	fee3000 uint32 = 3000
+
+	maxTimeout int64 = 9999999999
+	maxInt64   int64 = 9223372036854775807
+)
+
+func main(cur realm) {
+	println("[SCENARIO] 1. Initialize with default settings")
+	initializeWithDefaults(cur)
+	// Deposit must be called from main(cur) due to AssertOriginCall frame limit
+	testing.SetRealm(adminRealm)
+	testing.SetOriginSend(chain.Coins{{"ugnot", 50_000_000_000_000}})
+	wugnot.Deposit(cross(cur))
+	testing.SetOriginSend(chain.Coins{})
+	println()
+
+	println("[SCENARIO] 2. Create ugnot:gns:3000 pool")
+	createPool(cur)
+	println()
+
+	println("[SCENARIO] 3. Mint and stake position 01")
+	mintAndStakePosition01(cur)
+	println()
+
+	println("[SCENARIO] 4. Mint and stake position 02")
+	mintAndStakePosition02(cur)
+	println()
+
+	println("[SCENARIO] 5. Collect rewards for both positions")
+	collectRewardsBothPositions(cur)
+	println()
+
+	println("[SCENARIO] 6. Unstake position 02")
+	unstakePosition02(cur)
+	println()
+
+	println("[SCENARIO] 7. Collect rewards after unstaking")
+	collectRewardsAfterUnstaking(cur)
+}
+
+func initializeWithDefaults(cur realm) {
+	testing.SetRealm(adminRealm)
+	scenarioutils.EnsureCanonicalDefaultPool(cross(cur))
+	emission.SetDistributionStartTime(cross(cur), time.Now().Unix()+1)
+
+	println("[INFO] prepare wugnot by depositing ugnot")
+	testing.IssueCoins(adminAddr, chain.Coins{{"ugnot", 100_000_000_000_000}})
+	banker_ := banker.NewBanker(banker.BankerTypeRealmSend, cur)
+	banker_.SendCoins(adminAddr, wugnotAddr, chain.Coins{{"ugnot", 50_000_000_000_000}})
+	// Deposit is done in main(cur)
+
+	println("[INFO] set unstaking fee to 0")
+	sr.SetUnStakingFee(cross(cur), 0)
+
+	println("[INFO] register gns change callback")
+	testing.SetRealm(stakerRealm)
+}
+
+func createPool(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] set pool creation fee to 0")
+	pl.SetPoolCreationFee(cross(cur), 0)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] create wugnot:gns:3000 pool")
+	poolPath := pl.GetPoolPath(wugnotPath, gnsPath, fee3000)
+	if !pl.ExistsPoolPath(poolPath) {
+		pl.CreatePool(
+			cross(cur),
+			wugnotPath,
+			gnsPath,
+			fee3000,
+			gnsmath.TickMathGetSqrtRatioAtTick(0).ToString(), // price ratio 1:1
+		)
+	}
+
+	ufmt.Printf("[EXPECTED] pool created with price ratio 1:1\n")
+}
+
+func mintAndStakePosition01(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve tokens for position 01")
+	wugnot.Approve(cross(cur), poolAddr, maxInt64)
+	gns.Approve(cross(cur), poolAddr, maxInt64)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] mint position 01 (tick range: -60 ~ 60)")
+	lpTokenId, liquidity, amount0, amount1 := pn.Mint(
+		cross(cur),
+		wugnotPath,
+		gnsPath,
+		fee3000,
+		int32(-60),
+		int32(60),
+		"100",
+		"100",
+		"0",
+		"0",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position 01 - ID: %d, liquidity: %s\n", lpTokenId, liquidity)
+	ufmt.Printf("[EXPECTED] amounts - wugnot: %s, gns: %s\n", amount0, amount1)
+
+	println("[INFO] approve NFT to staker and stake position 01")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, 1))
+	sr.StakeToken(cross(cur), 1, "")
+
+	ufmt.Printf("[EXPECTED] position 01 staked\n")
+}
+
+func mintAndStakePosition02(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] approve tokens for position 02")
+	wugnot.Approve(cross(cur), poolAddr, maxInt64)
+	gns.Approve(cross(cur), poolAddr, maxInt64)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] mint position 02 (tick range: -60 ~ 60)")
+	lpTokenId, liquidity, amount0, amount1 := pn.Mint(
+		cross(cur),
+		wugnotPath,
+		gnsPath,
+		fee3000,
+		int32(-60),
+		int32(60),
+		"100",
+		"100",
+		"0",
+		"0",
+		maxTimeout,
+		adminAddr,
+		"",
+	)
+
+	ufmt.Printf("[EXPECTED] position 02 - ID: %d, liquidity: %s\n", lpTokenId, liquidity)
+	ufmt.Printf("[EXPECTED] amounts - wugnot: %s, gns: %s\n", amount0, amount1)
+
+	println("[INFO] approve NFT to staker and stake position 02")
+	gnft.Approve(cross(cur), stakerAddr, positionIdFrom(cur, 2))
+	sr.StakeToken(cross(cur), 2, "")
+	testing.SkipHeights(1)
+
+	ufmt.Printf("[EXPECTED] position 02 staked\n")
+}
+
+func collectRewardsBothPositions(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] clear any accumulated rewards first")
+	sr.CollectReward(cross(cur), 1)
+	sr.CollectReward(cross(cur), 2)
+
+	testing.SkipHeights(1)
+
+	println("[INFO] collect reward for position 01")
+	beforeGns := gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 1)
+	afterGns := gns.BalanceOf(adminUser)
+	reward1 := afterGns - beforeGns
+
+	ufmt.Printf("[EXPECTED] position 01 reward: %d\n", reward1)
+
+	// Expected calculation: 10702054 * 50% * 30% = 1605307
+	if !isInErrorRange(cur, uint64(reward1), 1605307) {
+		ufmt.Printf("[WARNING] expected around 1605307, got %d\n", reward1)
+	}
+
+	println("[INFO] collect reward for position 02")
+	beforeGns = gns.BalanceOf(adminUser)
+	sr.CollectReward(cross(cur), 2)
+	afterGns = gns.BalanceOf(adminUser)
+	reward2 := afterGns - beforeGns
+
+	ufmt.Printf("[EXPECTED] position 02 reward: %d\n", reward2)
+
+	// Both positions should get equal rewards as they have same liquidity
+	if !isInErrorRange(cur, uint64(reward2), 1605307) {
+		ufmt.Printf("[WARNING] expected around 1605307, got %d\n", reward2)
+	}
+}
+
+func unstakePosition02(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] unstake position 02")
+	sr.UnStakeToken(cross(cur), 2)
+
+	owner := gnft.MustOwnerOf(positionIdFrom(cur, 2))
+	ufmt.Printf("[EXPECTED] position 02 owner after unstaking: %s\n", owner)
+
+	if owner != adminAddr {
+		panic("position 02 should be returned to admin after unstaking")
+	}
+}
+
+func collectRewardsAfterUnstaking(cur realm) {
+	testing.SetRealm(adminRealm)
+
+	println("[INFO] collect reward for position 01 after position 02 unstaked")
+	beforeGns := gns.BalanceOf(adminUser)
+	testing.SkipHeights(1)
+	sr.CollectReward(cross(cur), 1)
+	afterGns := gns.BalanceOf(adminUser)
+	reward := afterGns - beforeGns
+
+	ufmt.Printf("[EXPECTED] position 01 reward after unstaking pos 02: %d\n", reward)
+
+	// Now position 01 should get full reward: 10702054 * 30% = 3210615
+	if !isInErrorRange(cur, uint64(reward), 3210615) {
+		ufmt.Printf("[WARNING] expected around 3210615, got %d\n", reward)
+	}
+
+	println("[INFO] position 01 now receives full rewards since position 02 is unstaked")
+}
+
+func isInErrorRange(cur realm, actual, expected uint64) bool {
+	diff := uint64(0)
+	if actual > expected {
+		diff = actual - expected
+	} else {
+		diff = expected - actual
+	}
+
+	// Allow 1% error margin
+	errorMargin := expected / 100
+	if errorMargin == 0 {
+		errorMargin = 1
+	}
+
+	return diff <= errorMargin
+}
+
+func positionIdFrom(cur realm, positionId any) grc721.TokenID {
+	if positionId == nil {
+		panic("positionId is nil")
+	}
+
+	switch positionId.(type) {
+	case string:
+		return grc721.TokenID(positionId.(string))
+	case int:
+		return grc721.TokenID(strconv.Itoa(positionId.(int)))
+	case uint64:
+		return grc721.TokenID(strconv.Itoa(int(positionId.(uint64))))
+	case grc721.TokenID:
+		return positionId.(grc721.TokenID)
+	default:
+		panic("unsupported positionId type")
+	}
+}
+
+// Output:
+// [SCENARIO] 1. Initialize with default settings
+// [INFO] prepare wugnot by depositing ugnot
+// [INFO] set unstaking fee to 0
+// [INFO] register gns change callback
+//
+// [SCENARIO] 2. Create ugnot:gns:3000 pool
+// [INFO] set pool creation fee to 0
+// [INFO] create wugnot:gns:3000 pool
+// [EXPECTED] pool created with price ratio 1:1
+//
+// [SCENARIO] 3. Mint and stake position 01
+// [INFO] approve tokens for position 01
+// [INFO] mint position 01 (tick range: -60 ~ 60)
+// [EXPECTED] position 01 - ID: 1, liquidity: 33385
+// [EXPECTED] amounts - wugnot: 100, gns: 100
+// [INFO] approve NFT to staker and stake position 01
+// [EXPECTED] position 01 staked
+//
+// [SCENARIO] 4. Mint and stake position 02
+// [INFO] approve tokens for position 02
+// [INFO] mint position 02 (tick range: -60 ~ 60)
+// [EXPECTED] position 02 - ID: 2, liquidity: 33385
+// [EXPECTED] amounts - wugnot: 100, gns: 100
+// [INFO] approve NFT to staker and stake position 02
+// [EXPECTED] position 02 staked
+//
+// [SCENARIO] 5. Collect rewards for both positions
+// [INFO] clear any accumulated rewards first
+// [INFO] collect reward for position 01
+// [EXPECTED] position 01 reward: 4013270
+// [WARNING] expected around 1605307, got 4013270
+// [INFO] collect reward for position 02
+// [EXPECTED] position 02 reward: 4013270
+// [WARNING] expected around 1605307, got 4013270
+//
+// [SCENARIO] 6. Unstake position 02
+// [INFO] unstake position 02
+// [EXPECTED] position 02 owner after unstaking: g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5
+//
+// [SCENARIO] 7. Collect rewards after unstaking
+// [INFO] collect reward for position 01 after position 02 unstaked
+// [EXPECTED] position 01 reward after unstaking pos 02: 8026540
+// [WARNING] expected around 3210615, got 8026540
+// [INFO] position 01 now receives full rewards since position 02 is unstaked
