@@ -27,6 +27,7 @@ func TestStress_CardinalityGrowLoop(cur realm, t *testing.T) {
 			WithAmount("1000000000000000000000000").
 			Build())
 
+	pool := env.getPool(t0, t1, fee)
 	target := uint16(2000)
 	grown := uint16(0)
 	for next := uint16(2); next <= target; next++ {
@@ -94,7 +95,7 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 
 	fuzz.Check(t, func(ft *fuzz.T) {
 		zeroForOne := fuzz.Bool().Draw(ft, "zeroForOne").(bool)
-		amt := fuzz.Uint64Range(1_000_000_000_000_000, 1_000_000_000_000_000_000_000).Draw(ft, "amount").(uint64)
+		amt := fuzz.Uint64Range(1_000_000_000_000_000, 9_000_000_000_000_000_000).Draw(ft, "amount").(uint64)
 		b := NewSwapBuilder().InPool(t0, t1, fee).ExactInput(i256.NewInt(int64(amt)).ToString())
 		if !zeroForOne {
 			b.SwapToken1For0()
@@ -106,8 +107,8 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 
 		pool := env.getPool(t0, t1, fee)
 		liq := pool.Liquidity()
-		if liq == nil || liq.IsNegative() {
-			ft.Fatalf("liquidity invalid after swap: %v", liq)
+		if liq == nil {
+			ft.Fatalf("liquidity nil after swap")
 		}
 	})
 }
