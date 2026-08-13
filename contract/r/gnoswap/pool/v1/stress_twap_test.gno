@@ -89,8 +89,14 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 	testing.SetRealm(adminRealm)
 	mockInstanceSetPoolCreationFee(0, cur, 0)
 	mockInstanceCreatePool(0, cur, barPath, bazPath, STANDARD_FEE_TIER, EQUAL_PRICE_RATIO)
+	TokenApprove(cur, t, barPath, adminAddr, poolAddr, maxApprove)
+	TokenApprove(cur, t, bazPath, adminAddr, poolAddr, maxApprove)
 
 	// Scattered liquidity so swaps must traverse multiple tick ranges.
+	// The position owner (admin) must hold the underlying tokens to mint; faucet
+	// them first (each call grants 5e9).
+	TokenFaucet(cur, t, barPath, adminAddr)
+	TokenFaucet(cur, t, bazPath, adminAddr)
 	testing.SetRealm(posRealm)
 	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -10020, -9000, "10000000", adminAddr)
 	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -4980, -4020, "20000000", adminAddr)
