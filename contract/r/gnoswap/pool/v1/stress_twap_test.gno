@@ -144,7 +144,9 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 		if liq == nil {
 			ft.Fatalf("liquidity nil after fuzz swap")
 		}
-		if liq.IsNeg() {
+		// u256 is unsigned; if Liquidity were ever negative it would indicate a
+		// sign-handling bug in computeSwap — surface it via raw comparison.
+		if liq.Cmp(u256.Zero()) < 0 {
 			ft.Fatalf("negative liquidity after fuzz swap: %s", liq.ToString())
 		}
 	})
