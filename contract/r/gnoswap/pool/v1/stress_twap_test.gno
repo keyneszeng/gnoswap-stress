@@ -89,23 +89,10 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 	testing.SetRealm(adminRealm)
 	mockInstanceSetPoolCreationFee(0, cur, 0)
 	mockInstanceCreatePool(0, cur, barPath, bazPath, STANDARD_FEE_TIER, EQUAL_PRICE_RATIO)
-	TokenApprove(cur, t, barPath, adminAddr, poolAddr, maxApprove)
-	TokenApprove(cur, t, bazPath, adminAddr, poolAddr, maxApprove)
 
-	// Scattered liquidity so swaps must traverse multiple tick ranges.
-	// The position owner (admin) must hold the underlying tokens to mint; faucet
-	// them first (each call grants 5e9).
-	TokenFaucet(cur, t, barPath, adminAddr)
-	TokenFaucet(cur, t, bazPath, adminAddr)
-	testing.SetRealm(posRealm)
-	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -10020, -9000, "10000000", adminAddr)
-	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -4980, -4020, "20000000", adminAddr)
-	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 0, 1020, "30000000", adminAddr)
-	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 8040, 10020, "40000000", adminAddr)
-
-	// Fund and approve a dedicated swapper (alice) — avoids the admin self-transfer
-	// panic. Faucet grants 5e9 each call; top up a few times so the fuzzed swap
-	// amounts (kept within balance) never hit an insufficient-balance revert.
+	// Fund and approve a dedicated position owner + swapper (alice). Faucet
+	// grants 5e9 each call; top up a few times so both the minted liquidity and
+	// the fuzzed swap amounts (kept within balance) never hit a balance revert.
 	testing.SetOriginCaller(alice)
 	testing.SetRealm(testing.NewUserRealm(alice))
 	for i := 0; i < 4; i++ {
@@ -114,6 +101,13 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 	}
 	TokenApprove(cur, t, barPath, alice, poolAddr, maxApprove)
 	TokenApprove(cur, t, bazPath, alice, poolAddr, maxApprove)
+
+	// Scattered liquidity so swaps must traverse multiple tick ranges.
+	testing.SetRealm(posRealm)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -10020, -9000, "10000000", alice)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -4980, -4020, "20000000", alice)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 0, 1020, "30000000", alice)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 8040, 10020, "40000000", alice)
 
 	const minLimit = "4295128740"
 	const maxLimit = "1461446703485210103287273052203988822378723970341"
