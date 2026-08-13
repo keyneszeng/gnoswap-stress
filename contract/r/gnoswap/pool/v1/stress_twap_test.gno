@@ -6,6 +6,8 @@ import (
 	i256 "gno.land/p/gnoswap/int256"
 	u256 "gno.land/p/gnoswap/uint256"
 	"gno.land/p/gnoswap/fuzz"
+
+	pl "gno.land/r/gnoswap/pool"
 )
 
 // StressTest_CardinalityGrowLoop targets the linear-cost `grow()` loop in
