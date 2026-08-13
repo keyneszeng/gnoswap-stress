@@ -19,8 +19,8 @@ func TestStress_CardinalityGrowLoop(cur realm, t *testing.T) {
 	env := NewPoolTestEnv(t).AsAdmin()
 	const fee = FeeTier500
 	sqrtPrice := "792281625142643375935439503360" // ~1.0
-	t0 := "gno.land/r/gnoswap/test/mocktoken/weth"
-	t1 := "gno.land/r/gnoswap/test/mocktoken/wusdc"
+	t0 := "gno.land/r/onbloc/bar.BAR"
+	t1 := "gno.land/r/onbloc/baz.BAZ"
 
 	env.GivenPoolCreated(cur, t0, t1, fee, sqrtPrice).
 		AndLiquidityProvided(cur, NewLiquidityBuilder().
@@ -44,8 +44,8 @@ func TestStress_CardinalityGrowLoop(cur realm, t *testing.T) {
 func TestStress_PriceGriefing(cur realm, t *testing.T) {
 	env := NewPoolTestEnv(t).AsAdmin()
 	const fee = FeeTier3000
-	t0 := "gno.land/r/gnoswap/test/mocktoken/weth"
-	t1 := "gno.land/r/gnoswap/test/mocktoken/wusdc"
+	t0 := "gno.land/r/onbloc/bar.BAR"
+	t1 := "gno.land/r/onbloc/baz.BAZ"
 
 	extreme := "115792089237316195423570985008687907853269984665640564039457584007913129639935"
 
@@ -77,8 +77,8 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 	env := NewPoolTestEnv(t).AsAdmin()
 	const fee = FeeTier3000
 	sqrtPrice := "792281625142643375935439503360"
-	t0 := "gno.land/r/gnoswap/test/mocktoken/weth"
-	t1 := "gno.land/r/gnoswap/test/mocktoken/wusdc"
+	t0 := "gno.land/r/onbloc/bar.BAR"
+	t1 := "gno.land/r/onbloc/baz.BAZ"
 
 	env.GivenPoolCreated(cur, t0, t1, fee, sqrtPrice).
 		AndUserFunded(cur, env.currentAddress, t0, t1).
