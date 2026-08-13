@@ -46,77 +46,103 @@ func TestStress_CardinalityGrowLoop(cur realm, t *testing.T) {
 }
 
 // StressTest_PriceGriefing probes whether CreatePool validates sqrtPriceX96.
-// The manager.gno source comment claims the price is accepted "without
-// validation", but the VM may still guard numeric range. We call CreatePool
-// directly with an extreme-but-in-range price and observe whether it panics
-// (range guard) or succeeds (true unvalidated griefing vector).
+// The manager.gno source comment (lines 47-48) claims the price is accepted
+// "without validation". We call CreatePool directly with an extreme-but-in-range
+// price (~1e38, within Q64.96 numeric range but wildly off-market) and observe
+// whether it panics (numeric range guard) or succeeds (true unvalidated vector).
 func TestStress_PriceGriefing(cur realm, t *testing.T) {
-	env := NewPoolTestEnv(t).AsAdmin()
-	const fee = FeeTier3000
-	t0 := "gno.land/r/onbloc/bar.BAR"
-	t1 := "gno.land/r/onbloc/baz.BAZ"
+	initPoolTest(cur, t)
 
-	// max uint160-ish price (~1e38), within Q64.96 numeric range but far from 1.0
+	// ~1e38: inside uint256/Q64.96 numeric range, but a price ratio of ~1e38 is
+	// absurdly off-market. If CreatePool accepts it, the "no validation" comment
+	// is literally true and a griefer can mint a pool at any price.
 	extreme := "100000000000000000000000000000000000000" // 1e38
 
-	env.GivenPoolCreated(cur, t0, t1, fee, extreme)
-	pool := env.getPool(t0, t1, fee)
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+	mockInstanceCreatePool(0, cur, barPath, bazPath, STANDARD_FEE_TIER, extreme)
+
+	pool := getMockInstance().mustGetPool(GetPoolPath(barPath, bazPath, STANDARD_FEE_TIER))
 	if pool == nil {
-		t.Fatalf("pool was not created with extreme price (CreatePool range-guarded)")
+		t.Fatalf("CreatePool rejected extreme price (numeric range-guarded)")
 	}
-	t.Logf("pool created with extreme sqrtPriceX96=%s — price griefing vector reachable", extreme)
+	t.Logf("CreatePool ACCEPTED extreme sqrtPriceX96=%s — no reasonableness validation (manager.gno:47-48 confirmed)", extreme)
 
-	env.AndUserFunded(cur, env.currentAddress, t0, t1).
-		AndTokensApproved(cur, env.currentAddress, t0, t1)
+	// Now fund a swapper and add wide liquidity, then try a swap. Assert the
+	// off-market price does not trigger a VM panic (would be a DoS surface).
+	testing.SetOriginCaller(alice)
+	testing.SetRealm(testing.NewUserRealm(alice))
+	TokenFaucet(cur, t, barPath, alice)
+	TokenFaucet(cur, t, bazPath, alice)
+	TokenApprove(cur, t, barPath, alice, poolAddr, maxApprove)
+	TokenApprove(cur, t, bazPath, alice, poolAddr, maxApprove)
 
-	params := NewSwapBuilder().
-		InPool(t0, t1, fee).
-		SwapToken0For1().
-		ExactInput("1000000000000000000").
-		WithPriceLimit("0").
-		Build()
+	testing.SetRealm(posRealm)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -887220, 887220, "1000000000000000000000000", alice)
 
-	_, _ = env.WhenSwapExecuted(cur, params) // ignore revert; assert no VM panic
-	t.Logf("swap against griefed pool executed without VM panic")
+	testing.SetRealm(rouRealm)
+	// zeroForOne: price decreasing toward MIN valid limit; off-market price 1e38
+	// means there is effectively infinite liquidity to consume before reaching it.
+	_, _ = mockInstanceSwap(0, cur, barPath, bazPath, STANDARD_FEE_TIER, alice, true,
+		"1000000000000000000", "4295128740", mockSwapCallback)
+	t.Logf("swap against griefed (off-market) pool executed without VM panic")
 }
 
 // StressTest_FuzzSwapSequence runs a randomized high-frequency swap sequence
-// and asserts core invariants hold under chaos (no negative liquidity, tick
-// within bounds, no panic). Time-independent; exercises computeSwap paths.
+// against a scattered-liquidity pool and asserts core invariants hold under
+// chaos (no negative liquidity, pool state stays consistent, no VM panic).
+// Time-independent; exercises the computeSwap path under fuzz.
 func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
-	env := NewPoolTestEnv(t).AsAdmin()
-	const fee = FeeTier3000
-	sqrtPrice := "792281625142643375935439503360"
-	t0 := "gno.land/r/onbloc/bar.BAR"
-	t1 := "gno.land/r/onbloc/baz.BAZ"
+	initPoolTest(cur, t)
 
-	env.GivenPoolCreated(cur, t0, t1, fee, sqrtPrice).
-		AndUserFunded(cur, env.currentAddress, t0, t1).
-		AndTokensApproved(cur, env.currentAddress, t0, t1).
-		AndLiquidityProvided(cur, NewLiquidityBuilder().
-			ForPool(t0, t1, fee).
-			InRange(-887272, 887272).
-			WithAmount("1000000000000000000000000").
-			Build())
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+	mockInstanceCreatePool(0, cur, barPath, bazPath, STANDARD_FEE_TIER, EQUAL_PRICE_RATIO)
+
+	// Scattered liquidity so swaps must traverse multiple tick ranges.
+	testing.SetRealm(posRealm)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -10020, -9000, "10000000", adminAddr)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -4980, -4020, "20000000", adminAddr)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 0, 1020, "30000000", adminAddr)
+	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, 8040, 10020, "40000000", adminAddr)
+
+	// Fund and approve a dedicated swapper (alice) — avoids the admin self-transfer panic.
+	testing.SetOriginCaller(alice)
+	testing.SetRealm(testing.NewUserRealm(alice))
+	TokenFaucet(cur, t, barPath, alice)
+	TokenFaucet(cur, t, bazPath, alice)
+	TokenApprove(cur, t, barPath, alice, poolAddr, maxApprove)
+	TokenApprove(cur, t, bazPath, alice, poolAddr, maxApprove)
+
+	const minLimit = "4295128740"
+	const maxLimit = "1461446703485210103287273052203988822378723970341"
 
 	fuzz.Check(t, func(ft *fuzz.T) {
 		zeroForOne := fuzz.Bool().Draw(ft, "zeroForOne").(bool)
 		amt := fuzz.Uint64Range(1_000_000_000_000_000, 9_000_000_000_000_000_000).Draw(ft, "amount").(uint64)
-		b := NewSwapBuilder().InPool(t0, t1, fee).ExactInput(i256.NewInt(int64(amt)).ToString())
-		if !zeroForOne {
-			b.SwapToken1For0()
-		} else {
-			b.SwapToken0For1()
-		}
-		params := b.WithPriceLimit("0").Build()
-		_, _ = env.WhenSwapExecuted(cur, params)
 
-		pool := env.getPool(t0, t1, fee)
+		limit := minLimit
+		if !zeroForOne {
+			limit = maxLimit
+		}
+
+		testing.SetRealm(rouRealm)
+		_, _ = mockInstanceSwap(0, cur, barPath, bazPath, STANDARD_FEE_TIER, alice, zeroForOne,
+			i256.NewInt(int64(amt)).ToString(), limit, mockSwapCallback)
+
+		pool := getMockInstance().mustGetPool(GetPoolPath(barPath, bazPath, STANDARD_FEE_TIER))
+		if pool == nil {
+			ft.Fatalf("pool disappeared after fuzz swap")
+		}
 		liq := pool.Liquidity()
 		if liq == nil {
-			ft.Fatalf("liquidity nil after swap")
+			ft.Fatalf("liquidity nil after fuzz swap")
+		}
+		if liq.IsNegative() {
+			ft.Fatalf("negative liquidity after fuzz swap: %s", liq.ToString())
 		}
 	})
+	t.Logf("fuzz swap sequence completed: invariants held (liquidity >= 0, no VM panic)")
 }
 
 var _ = u256.Zero // keep u256 import used
