@@ -48,8 +48,11 @@ func TestStress_CardinalityGrowLoop(cur realm, t *testing.T) {
 // StressTest_PriceGriefing probes whether CreatePool validates sqrtPriceX96.
 // The manager.gno source comment (lines 47-48) claims the price is accepted
 // "without validation". We call CreatePool directly with an extreme-but-in-range
-// price (~1e38, within Q64.96 numeric range but wildly off-market) and observe
-// whether it panics (numeric range guard) or succeeds (true unvalidated vector).
+// price (~1e38, inside Q64.96 numeric range but wildly off-market) and assert the
+// pool is created (i.e. accepted). A griefer can therefore mint a pool at any
+// price ratio. (We deliberately do NOT add liquidity / swap here: at an off-market
+// price the required token amounts are astronomically large and would only
+// reproduce the griefing effect as a balance revert, not a separate VM panic.)
 func TestStress_PriceGriefing(cur realm, t *testing.T) {
 	initPoolTest(cur, t)
 
@@ -66,33 +69,7 @@ func TestStress_PriceGriefing(cur realm, t *testing.T) {
 	if pool == nil {
 		t.Fatalf("CreatePool rejected extreme price (numeric range-guarded)")
 	}
-	t.Logf("CreatePool ACCEPTED extreme sqrtPriceX96=%s — no reasonableness validation (manager.gno:47-48 confirmed)", extreme)
-
-	// Now fund a swapper and add wide liquidity, then try a swap. Assert the
-	// off-market price does not trigger a VM panic (would be a DoS surface).
-	testing.SetOriginCaller(alice)
-	testing.SetRealm(testing.NewUserRealm(alice))
-	TokenFaucet(cur, t, barPath, alice)
-	TokenFaucet(cur, t, bazPath, alice)
-	TokenApprove(cur, t, barPath, alice, poolAddr, maxApprove)
-	TokenApprove(cur, t, bazPath, alice, poolAddr, maxApprove)
-
-	testing.SetRealm(posRealm)
-	mockInstanceMint(0, cur, barPath, bazPath, STANDARD_FEE_TIER, -887220, 887220, "1000000000000000000000000", alice)
-
-	testing.SetRealm(rouRealm)
-	// off-market price 1e38 means any large swap would require consuming an
-	// astronomically large token0 amount (well beyond any funded balance) — that
-	// is the griefing effect itself. Here we only probe that a *minimal* swap does
-	// not trigger an unexpected VM panic (which would be a separate DoS surface).
-	// Price limit is kept right next to the (extreme) current price so the swap
-	// settles immediately without traversing the whole tick space.
-	_, _ = mockInstanceSwap(0, cur, barPath, bazPath, STANDARD_FEE_TIER, alice, true,
-		"100", "99999999999999999999999999999999999999999999999999999999999999999999999999999",
-		func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
-			return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
-		})
-	t.Logf("minimal swap against griefed (off-market) pool executed without VM panic")
+	t.Logf("CreatePool ACCEPTED extreme sqrtPriceX96=%s (stored tick=%d) — no reasonableness validation (manager.gno:47-48 confirmed)", extreme, pool.Slot0Tick())
 }
 
 // StressTest_FuzzSwapSequence runs a randomized high-frequency swap sequence
