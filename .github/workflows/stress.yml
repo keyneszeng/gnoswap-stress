@@ -44,22 +44,14 @@ jobs:
           make install.gno
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      - name: Symlink contracts into gno examples tree (mirrors upstream Makefile)
-        working-directory: gno
+      - name: Link contracts via upstream setup.py (mirrors `make test`)
+        working-directory: gnoswap
+        env:
+          GNOROOT: "$GITHUB_WORKSPACE/gno"
         run: |
           export PATH="$HOME/go/bin:$PATH"
-          # link both realm (r/) and pure (p/) trees so cross-imports resolve
-          SRC_R="$GITHUB_WORKSPACE/gnoswap/contract/r/gnoswap"
-          SRC_P="$GITHUB_WORKSPACE/gnoswap/contract/p/gnoswap"
-          DST_R="examples/gno.land/r/gnoswap"
-          DST_P="examples/gno.land/p/gnoswap"
-          mkdir -p "$(dirname "$DST_R")" "$(dirname "$DST_P")"
-          ln -sfn "$SRC_R" "$DST_R"
-          ln -sfn "$SRC_P" "$DST_P"
-          echo "linked $SRC_R -> $DST_R"
-          echo "linked $SRC_P -> $DST_P"
-          ls -la "$DST_R" | head -3
-          ls -la "$DST_P" | head -3
+          export GNOROOT="$GITHUB_WORKSPACE/gno"
+          python3 setup.py -w "$GITHUB_WORKSPACE"
 
       - name: Run stress tests
         working-directory: gno/examples
