@@ -56,6 +56,12 @@ func TestStress_CardinalityGrowLoop(cur realm, t *testing.T) {
 func TestStress_PriceGriefing(cur realm, t *testing.T) {
 	initPoolTest(cur, t)
 
+	// CreatePool charges a pool-creation fee in GNS; zero it for the stress test
+	// (mirrors dsl.GivenPoolCreated) so the only thing under test is the price arg.
+	testing.SetOriginCaller(adminAddr)
+	testing.SetRealm(adminRealm)
+	mockInstanceSetPoolCreationFee(0, cur, 0)
+
 	// ~1e38: inside uint256/Q64.96 numeric range, but a price ratio of ~1e38 is
 	// absurdly off-market. If CreatePool accepts it, the "no validation" comment
 	// is literally true and a griefer can mint a pool at any price.
@@ -81,6 +87,7 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 
 	testing.SetOriginCaller(adminAddr)
 	testing.SetRealm(adminRealm)
+	mockInstanceSetPoolCreationFee(0, cur, 0)
 	mockInstanceCreatePool(0, cur, barPath, bazPath, STANDARD_FEE_TIER, EQUAL_PRICE_RATIO)
 
 	// Scattered liquidity so swaps must traverse multiple tick ranges.
