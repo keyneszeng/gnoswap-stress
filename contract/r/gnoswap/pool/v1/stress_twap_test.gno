@@ -84,7 +84,10 @@ func TestStress_PriceGriefing(cur realm, t *testing.T) {
 	// zeroForOne: price decreasing toward MIN valid limit; off-market price 1e38
 	// means there is effectively infinite liquidity to consume before reaching it.
 	_, _ = mockInstanceSwap(0, cur, barPath, bazPath, STANDARD_FEE_TIER, alice, true,
-		"1000000000000000000", "4295128740", mockSwapCallback)
+		"1000000000000000000", "4295128740",
+		func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
+			return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+		})
 	t.Logf("swap against griefed (off-market) pool executed without VM panic")
 }
 
@@ -128,7 +131,10 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 
 		testing.SetRealm(rouRealm)
 		_, _ = mockInstanceSwap(0, cur, barPath, bazPath, STANDARD_FEE_TIER, alice, zeroForOne,
-			i256.NewInt(int64(amt)).ToString(), limit, mockSwapCallback)
+			i256.NewInt(int64(amt)).ToString(), limit,
+			func(cur realm, amount0Delta int64, amount1Delta int64, _ *pl.CallbackMarker) error {
+				return mockSwapCallback(cur, barPath, bazPath, amount0Delta, amount1Delta)
+			})
 
 		pool := getMockInstance().mustGetPool(GetPoolPath(barPath, bazPath, STANDARD_FEE_TIER))
 		if pool == nil {
@@ -138,7 +144,7 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 		if liq == nil {
 			ft.Fatalf("liquidity nil after fuzz swap")
 		}
-		if liq.IsNegative() {
+		if liq.IsNeg() {
 			ft.Fatalf("negative liquidity after fuzz swap: %s", liq.ToString())
 		}
 	})
