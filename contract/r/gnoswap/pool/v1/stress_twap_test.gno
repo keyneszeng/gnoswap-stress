@@ -2,6 +2,7 @@ package pool
 
 import (
 	"testing"
+	"time"
 
 	i256 "gno.land/p/gnoswap/int256"
 	u256 "gno.land/p/gnoswap/uint256"
@@ -18,17 +19,30 @@ import (
 // Uses the same mock-pool harness as oracle_test.go (initPoolTest/createTestPool).
 func TestStress_CardinalityGrowLoop(cur realm, t *testing.T) {
 	initPoolTest(cur, t)
-	createTestPool()
+	pool := createTestPool()
 
-	const fee = uint32(500)
-	t0 := "gno.land/r/onbloc/foo.FOO"
-	t1 := "gno.land/r/onbloc/bar.BAR"
+	// seed an observation state so grow() has a non-nil base to extend
+	currentTime := time.Now().Unix()
+	os := pool.ObservationState()
+	if os == nil {
+		os = pl.NewObservationState(currentTime)
+		pool.SetObservationState(os)
+	}
+	writeObservation(os, currentTime, pool.Slot0Tick(), pool.Liquidity())
+	os.SetCardinality(1)
+	os.SetCardinalityNext(1)
+	pool.SetObservationState(os)
 
+	// exercise the linear-cost grow() loop directly on the in-memory pool:
+	// increase cardinality one slot at a time forces O(n) slot-init loops.
 	target := uint16(2000)
 	for next := uint16(2); next <= target; next++ {
-		pl.IncreaseObservationCardinalityNext(cross(cur), t0, t1, fee, next)
+		err := increaseObservationCardinalityNextByPool(pool, next)
+		if err != nil {
+			t.Fatalf("grow failed at cardinality %d: %v", next, err)
+		}
 	}
-	t.Logf("cardinality grow completed: pushed cardinalityNext to %d", target)
+	t.Logf("cardinality grow completed: pushed cardinalityNext to %d (grow O(n) loop exercised)", target)
 }
 
 // StressTest_PriceGriefing probes whether CreatePool validates sqrtPriceX96.
