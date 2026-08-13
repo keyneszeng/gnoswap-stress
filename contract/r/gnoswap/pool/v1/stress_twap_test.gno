@@ -112,7 +112,7 @@ func TestStress_FuzzSwapSequence(cur realm, t *testing.T) {
 	const minLimit = "4295128740"
 	const maxLimit = "1461446703485210103287273052203988822378723970341"
 
-	fuzz.Check(t, func(ft *fuzz.T) {
+	fuzz.CheckN(t, 200, func(ft *fuzz.T) {
 		zeroForOne := fuzz.Bool().Draw(ft, "zeroForOne").(bool)
 		// keep within alice's funded balance (faucet tops up to ~2e10)
 		amt := fuzz.Uint64Range(100, 4_000_000_000).Draw(ft, "amount").(uint64)
